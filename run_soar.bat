@@ -50,9 +50,9 @@ echo ---------------------------------------------------------------
 echo           Pulling embedding model (nomic-embed-text)...
 ollama pull nomic-embed-text
 echo.
-echo           Pulling reasoning model (qwen2.5:7b-instruct-q4_K_M)...
-echo           This is ~4.4 GB. May take a few minutes on first run.
-ollama pull qwen2.5:7b-instruct-q4_K_M
+echo           Pulling reasoning model (qwen2.5:3b-instruct)...
+echo           This is ~1.9 GB. Should take just a few minutes.
+ollama pull qwen2.5:3b-instruct
 echo           Both models ready.
 
 echo.

@@ -72,7 +72,7 @@ execution:
    - ✅ Create a Python virtual environment
    - ✅ Install all pip dependencies
    - ✅ Download `nomic-embed-text` embedding model (~274 MB)
-   - ✅ Download `qwen2.5:7b-instruct-q4_K_M` reasoning model (~4.4 GB)
+   - ✅ Download `qwen2.5:3b-instruct` reasoning model (~1.9 GB)
    - ✅ Index all 8 threat playbooks into ChromaDB
    - ✅ Launch the FastAPI backend (port 8000)
    - ✅ Launch the Streamlit SOC Dashboard (port 8501)
@@ -173,7 +173,7 @@ Position your windows so the panel can see EVERYTHING simultaneously:
    - Click **🚀 SUBMIT TO CORE AUTOMATION GRAPH**
 
 2. **Narrate while the AI processes (30-60 seconds):**
-   > *"Right now, our first-stage deterministic filter has detected the keywords 'powershell -enc' — a known obfuscation technique. The log has been forwarded to our Triage Agent, which is a locally-running Qwen 2.5 7-billion parameter model. It's classifying the attack vector and extracting Indicators of Compromise..."*
+   > *"Right now, our first-stage deterministic filter has detected the keywords 'powershell -enc' — a known obfuscation technique. The log has been forwarded to our Triage Agent, which is a locally-running Qwen 2.5 3-billion parameter model. It's classifying the attack vector and extracting Indicators of Compromise..."*
 
 3. **Click into the incident** when it appears in the batch results
 
@@ -221,7 +221,7 @@ Use these when answering questions:
 > *"After triage, the system embeds the incident context and searches our ChromaDB vector store for matching playbook chunks. It runs a two-pass retrieval — narrow window first, then wider context — with a hard similarity threshold of 0.70. Only incidents that clear this threshold proceed to the neutralization pipeline."*
 
 ### "What's the model and why this specific one?"
-> *"Qwen 2.5 7B Instruct, quantized to Q4_K_M. This specific quantization fits in under 4.4GB VRAM, leaving headroom within a 6GB GPU ceiling. The context window is hard-capped at 4,096 tokens to prevent VRAM overflow. The embedding model (nomic-embed-text) is explicitly pinned to CPU to avoid GPU contention."*
+> *"Qwen 2.5 3B Instruct. This lightweight model fits in under 2GB VRAM, making it runnable even on systems without a dedicated GPU. The context window is hard-capped at 4,096 tokens to prevent memory overflow. The embedding model (nomic-embed-text) is explicitly pinned to CPU to avoid GPU contention. For production deployments with more capable hardware, we can scale up to the 7B or 14B variants without any code changes — it's a single config line swap."*
 
 ---
 
@@ -231,9 +231,9 @@ Use these when answering questions:
 **Fix:** The backend hasn't started yet. Check the "SOAR Backend" terminal window for errors. Common cause: port 8000 is already in use. Kill the other process or change the port.
 
 ### Problem: AI response is garbage / JSON parse errors
-**Fix:** The wrong model may be loaded. Run `ollama list` in Command Prompt and verify `qwen2.5:7b-instruct-q4_K_M` appears. If you see `qwen2.5:1.5b-instruct` instead, run:
+**Fix:** The wrong model may be loaded. Run `ollama list` in Command Prompt and verify `qwen2.5:3b-instruct` appears. If you see `qwen2.5:1.5b-instruct` instead, run:
 ```
-ollama pull qwen2.5:7b-instruct-q4_K_M
+ollama pull qwen2.5:3b-instruct
 ```
 
 ### Problem: Notepad doesn't close when I click Approve
@@ -253,7 +253,7 @@ python -m rag.ingest_playbooks
 **Fix:** Python 3.10+ must be installed AND added to PATH. During Python installation, check the "Add Python to PATH" checkbox.
 
 ### Problem: Very slow AI responses (>2 minutes)
-**Cause:** No GPU available — the model is running on CPU. This is fine, just slower. Wait patiently. The 7B Q4 model takes ~60-90 seconds per call on CPU.
+**Cause:** No GPU available — the model is running on CPU. This is fine, just slower. Wait patiently. The 3B model takes ~30-60 seconds per call on CPU.
 
 ---
 
@@ -274,7 +274,7 @@ python -m rag.ingest_playbooks
 | Config file | `config/hitl_config.yaml` |
 | Demo attack file | `data/samples/demo_attack.txt` |
 | Live kill toggle | `execution.dry_run: false` |
-| Reasoning model | `qwen2.5:7b-instruct-q4_K_M` |
+| Reasoning model | `qwen2.5:3b-instruct` |
 | Embedding model | `nomic-embed-text` |
 | HITL timeout | 300 seconds |
 | RAG threshold | 0.70 similarity |

@@ -31,10 +31,10 @@ forensics:
 models:
   reasoning:
     provider: "ollama"
-    model: "qwen2.5:7b-instruct-q4_K_M"
+    model: "qwen2.5:3b-instruct"
     num_ctx: 4096
     temperature: 0.0          # zero-temp for all schema-constrained parsing
-    max_vram_gb: 6
+    max_vram_gb: 4
   embedding:
     provider: "ollama"
     model: "nomic-embed-text"
