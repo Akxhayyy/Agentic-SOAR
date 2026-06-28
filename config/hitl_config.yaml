@@ -1,0 +1,52 @@
+# config/hitl_config.yaml
+#
+# Single source of truth for runtime behavior. The app must fail loudly at
+# startup (not silently default) if this file is missing or malformed —
+# see core/graph.py:load_config().
+
+execution:
+  # When true, execution/wrapper.py routes all actions through
+  # execution/stub_infra_api.py instead of real host/firewall/directory
+  # service calls. Code paths are IDENTICAL either way — only the
+  # underlying API client is swapped.
+  dry_run: true
+  exec_result_dir: "/tmp/soar"
+
+hitl:
+  timeout_seconds: 300
+  checkpointer_db_path: "/opt/soar/vectorstore/graph_state.db"
+
+forensics:
+  similarity_hard_threshold: 0.70   # the ONLY value the escalation edge checks
+  pass_1:
+    window_seconds: 30
+    top_k: 5
+  pass_2:
+    window_seconds: 300             # ±5m
+    top_k: 8
+    similarity_floor: 0.35          # recall-only param, NOT a decision threshold
+  chroma_persist_dir: "./data/vectorstore"
+  playbook_dir: "./config/playbooks"
+
+models:
+  reasoning:
+    provider: "ollama"
+    model: "qwen2.5:7b-instruct-q4_K_M"
+    num_ctx: 4096
+    temperature: 0.0          # zero-temp for all schema-constrained parsing
+    max_vram_gb: 6
+  embedding:
+    provider: "ollama"
+    model: "nomic-embed-text"
+    device: "cpu"             # explicitly pinned off-GPU; 0-byte VRAM cost
+
+dashboard:
+  layout:
+    left_pct: 30
+    center_pct: 45
+    right_pct: 25
+  refresh_interval_ms: 1000
+
+logging:
+  level: "INFO"
+  audit_log_path: "./data/audit.log"

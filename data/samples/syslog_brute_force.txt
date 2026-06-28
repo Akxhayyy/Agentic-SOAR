@@ -1,0 +1,6 @@
+[AUTH] Jun 23 22:10:01 host-auth user administrator: failed login
+[AUTH] Jun 23 22:10:10 host-auth user administrator: failed login
+[AUTH] Jun 23 22:10:20 host-auth user administrator: failed login
+[AUTH] Jun 23 22:10:30 host-auth user administrator: failed login
+[AUTH] Jun 23 22:10:40 host-auth user administrator: failed login
+[AUTH] Jun 23 22:10:50 host-auth user administrator: successful login

@@ -1,0 +1,7 @@
+timestamp,ip,username,message
+2026-06-25T00:30:01Z,192.168.1.200,test_operator,failed login
+2026-06-25T00:30:05Z,192.168.1.200,test_operator,failed login
+2026-06-25T00:30:10Z,192.168.1.200,test_operator,failed login
+2026-06-25T00:30:15Z,192.168.1.200,test_operator,failed login
+2026-06-25T00:30:20Z,192.168.1.200,test_operator,failed login
+2026-06-25T00:30:25Z,192.168.1.200,test_operator,successful login

@@ -1,0 +1,28 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# ChromaDB vector store (rebuilt on setup)
+data/vectorstore/
+
+# SQLite checkpointer state (per-machine)
+*.db
+
+# Execution result artifacts
+data/exec_results/
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Verification scratch scripts
+verify_expansion.py
