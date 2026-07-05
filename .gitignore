@@ -16,6 +16,9 @@ data/vectorstore/
 # Execution result artifacts
 data/exec_results/
 
+# Generated incident reports (per-machine)
+data/reports/
+
 # OS junk
 Thumbs.db
 .DS_Store
@@ -23,6 +26,3 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
-
-# Verification scratch scripts
-verify_expansion.py

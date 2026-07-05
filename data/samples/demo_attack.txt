@@ -1,1 +1,1 @@
-ALERT: Malware execution confirmed. Rogue process PID:REPLACE_WITH_ACTUAL_PID spawning encoded reverse shell via powershell -enc on workstation WS-DEMO-01
+                                                  ALERT: Malware execution confirmed. Rogue process PID:2024 spawning encoded reverse shell via powershell -enc on workstation WS-DEMO-01

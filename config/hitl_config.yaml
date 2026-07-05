@@ -10,11 +10,11 @@ execution:
   # service calls. Code paths are IDENTICAL either way — only the
   # underlying API client is swapped.
   dry_run: true
-  exec_result_dir: "/tmp/soar"
+  exec_result_dir: "./data/exec_results"
 
 hitl:
   timeout_seconds: 300
-  checkpointer_db_path: "/opt/soar/vectorstore/graph_state.db"
+  checkpointer_db_path: "./data/vectorstore/graph_state.db"
 
 forensics:
   similarity_hard_threshold: 0.70   # the ONLY value the escalation edge checks
@@ -31,7 +31,7 @@ forensics:
 models:
   reasoning:
     provider: "ollama"
-    model: "qwen2.5:3b-instruct"
+    model: "qwen2.5:7b-instruct-q4_K_M"
     num_ctx: 4096
     temperature: 0.0          # zero-temp for all schema-constrained parsing
     max_vram_gb: 4
