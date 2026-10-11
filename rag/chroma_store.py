@@ -28,6 +28,12 @@ from core.graph_config import load_config
 from agents.llm_client import call_embedding_model
 
 _COLLECTION_NAME = "soar_playbooks"
+_COLLECTION_METADATA = {"hnsw:space": "cosine"}
+
+# nomic-embed-text is trained with task prefixes; omitting them noticeably
+# lowers similarity for genuinely matching query/document pairs.
+QUERY_PREFIX = "search_query: "
+DOCUMENT_PREFIX = "search_document: "
 _client = None  # lazy singleton, initialized on first call
 
 
@@ -42,8 +48,18 @@ def _get_client():
 
 
 def _get_collection():
+    # Always pass the cosine metadata: previously a query that ran before
+    # ingest created the collection in Chroma's default L2 space, making the
+    # `1 - distance` similarity math below meaningless.
     client = _get_client()
-    return client.get_or_create_collection(name=_COLLECTION_NAME)
+    return client.get_or_create_collection(name=_COLLECTION_NAME, metadata=_COLLECTION_METADATA)
+
+
+def collection_count() -> int:
+    try:
+        return _get_collection().count()
+    except Exception:  # noqa: BLE001 — health probe only
+        return 0
 
 
 def _embedding_model_name() -> str:
@@ -67,7 +83,7 @@ def query_playbooks(
     if collection.count() == 0:
         return []
 
-    query_embedding = call_embedding_model(query_text, model=_embedding_model_name())
+    query_embedding = call_embedding_model(QUERY_PREFIX + query_text, model=_embedding_model_name())
 
     fetch_n = top_k if similarity_floor is None else min(top_k * 3, collection.count())
     raw = collection.query(
@@ -79,8 +95,9 @@ def query_playbooks(
     ids = raw.get("ids", [[]])[0]
     documents = raw.get("documents", [[]])[0]
     distances = raw.get("distances", [[]])[0]
+    metadatas = (raw.get("metadatas") or [[]])[0] or [{}] * len(ids)
 
-    for doc_id, doc_text, distance in zip(ids, documents, distances):
+    for doc_id, doc_text, distance, meta in zip(ids, documents, distances, metadatas):
         # Chroma's default distance is L2 or cosine-distance depending on
         # collection config; we configure cosine space at collection
         # creation time, so similarity = 1 - cosine_distance.
@@ -91,7 +108,7 @@ def query_playbooks(
 
         matches.append(
             PlaybookMatch(
-                playbook_id=doc_id[:128],
+                playbook_id=str((meta or {}).get("source_file") or doc_id)[:128],
                 chunk_text=doc_text[:2048],
                 similarity_score=round(similarity, 4),
             )
@@ -104,14 +121,15 @@ def query_playbooks(
     return matches
 
 
-def ensure_cosine_collection():
+def reset_collection():
     """
-    Call once at setup time (see rag/ingest_playbooks.py). Chroma collections
-    default to L2 distance; we need cosine space so the 1 - distance =
-    similarity math above holds.
+    Drops and recreates the collection in cosine space. Called by
+    rag/ingest_playbooks.py so a re-ingest never mixes vectors embedded with
+    different prefixes/models, and a legacy L2 collection gets replaced.
     """
     client = _get_client()
-    client.get_or_create_collection(
-        name=_COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
+    try:
+        client.delete_collection(_COLLECTION_NAME)
+    except Exception:  # noqa: BLE001 — collection may not exist yet
+        pass
+    return client.get_or_create_collection(name=_COLLECTION_NAME, metadata=_COLLECTION_METADATA)

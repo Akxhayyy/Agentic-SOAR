@@ -43,6 +43,7 @@ import hashlib
 import json
 import logging
 import re
+import socket
 from pathlib import Path
 
 from core.uicr_schema import ActionPlan, ActionType, ExecutionResult, PipelinePhase, UICRState
@@ -54,7 +55,7 @@ logger = logging.getLogger("soar.execution_wrapper")
 # Independently re-declared here rather than imported from core.uicr_schema —
 # deliberate: this module must remain correct even if someone changes the
 # schema module's import surface. Keep the literal pattern identical.
-SAFE_TOKEN_PATTERN = re.compile(r"^[\w.:\-@]+$")
+SAFE_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-@]+$")  # ASCII only: \w admits Unicode homoglyphs
 
 
 def _canonical_payload(action_type: str, target: str, params: dict) -> str:
@@ -69,6 +70,16 @@ def _canonical_payload(action_type: str, target: str, params: dict) -> str:
 def _recompute_hash(action_type: str, target: str, params: dict) -> str:
     canonical = _canonical_payload(action_type, target, params)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _is_protected(target: str, cfg: dict) -> bool:
+    """Independent re-implementation of the Neutralizer deny-list check."""
+    protected = {str(t).lower() for t in cfg["execution"].get("protected_targets", [])}
+    try:
+        protected.add(socket.gethostname().lower())
+    except OSError:
+        pass
+    return target.lower() in protected
 
 
 def _get_infra_client():
@@ -111,7 +122,7 @@ def execute_action(state: UICRState) -> UICRState:
     # --- Layer 1: hash re-verification -----------------------------------
     recomputed = _recompute_hash(plan.action_type.value, plan.target, plan.params)
     hash_ok = recomputed == plan.payload_hash
-    if not hash_ok:
+    if not hash_ok and cfg["security"]["hash_check"]:
         logger.critical(
             "PAYLOAD HASH MISMATCH for incident %s: stored=%s recomputed=%s. "
             "Aborting execution — possible state tampering.",
@@ -132,6 +143,19 @@ def execute_action(state: UICRState) -> UICRState:
         return _record_failed_execution(
             state, target=plan.target, action_type=plan.action_type,
             error="target failed independent charset allow-list re-check.",
+            hash_verified=True,
+        )
+
+    # --- Layer 2b: protected-asset deny-list, re-checked independently ----
+    if (
+        plan.action_type != ActionType.NO_ACTION
+        and cfg["security"]["deny_list"]
+        and _is_protected(plan.target, cfg)
+    ):
+        logger.critical("Target '%s' is a protected asset. Aborting.", plan.target[:32])
+        return _record_failed_execution(
+            state, target=plan.target, action_type=plan.action_type,
+            error="target is on the protected-asset deny-list; execution refused.",
             hash_verified=True,
         )
 
@@ -160,9 +184,11 @@ def execute_action(state: UICRState) -> UICRState:
             action_type=plan.action_type,
             target=plan.target,
             dry_run=dry_run,
-            success=True,
-            hash_verified=True,
+            success=stub_response.get("status") != "FAILED",
+            hash_verified=hash_ok,
             stub_response=stub_response,
+            error_message=(stub_response.get("stderr") or "OS command failed")[:512]
+            if stub_response.get("status") == "FAILED" else None,
         )
     except Exception as e:  # noqa: BLE001 — this boundary must never crash the graph
         logger.exception("Execution failed for incident %s", state.get("incident_id"))

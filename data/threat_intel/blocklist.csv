@@ -1,0 +1,26 @@
+# SOAR Capsule offline threat-intel feed (SYNTHETIC — for the air-gapped demo).
+# IPs use RFC 5737 documentation ranges, domains use the reserved .example TLD,
+# and hashes are the public EICAR anti-virus test file, so no real
+# infrastructure or person is ever referenced. Replace with a real feed export
+# (same columns) in a production deployment.
+# type: ip | cidr | domain | hash | process | user
+indicator,type,severity,source,description
+203.0.113.0/24,cidr,high,demo-feed,Known C2 hosting range (TEST-NET-3)
+198.51.100.23,ip,high,demo-feed,Credential-stuffing botnet node
+198.51.100.77,ip,medium,demo-feed,Mass scanner observed probing SSH/RDP
+192.0.2.66,ip,high,demo-feed,Exfiltration drop server
+192.0.2.140,ip,medium,demo-feed,Open SOCKS proxy used for tunneling
+evil-c2.example,domain,high,demo-feed,Command-and-control beacon domain
+cdn-update.example,domain,medium,demo-feed,Typosquatted update host serving droppers
+paste-drop.example,domain,medium,demo-feed,Paste site abused for staged exfiltration
+44d88612fea8a8f36de82e1278abb02f,hash,high,eicar,EICAR test file (MD5)
+3395856ce81f2b7382dee72602f798b642f14140,hash,high,eicar,EICAR test file (SHA-1)
+275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f,hash,high,eicar,EICAR test file (SHA-256)
+mimikatz.exe,process,critical,tooling,Credential dumping tool
+procdump.exe,process,medium,tooling,LSASS dumping when targeted at lsass.exe
+rclone.exe,process,medium,tooling,Frequently abused for bulk cloud exfiltration
+nc.exe,process,high,tooling,Netcat — reverse shell / bind shell utility
+psexec.exe,process,medium,tooling,Remote execution tool used for lateral movement
+cobaltstrike,process,critical,tooling,Commercial C2 framework beacon
+xmrig,process,high,tooling,Cryptominer payload
+svc-backdoor,user,critical,demo-feed,Account created by known intrusion set

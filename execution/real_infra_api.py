@@ -50,12 +50,14 @@ def terminate_process(target: str, params: dict) -> dict:
     Windows: taskkill /F /PID <target>
     Unix:    kill -9 <target>
 
-    The target is expected to be a PID number (as a string, e.g. "8432").
+    The target is a PID ("8432") or an image name ("notepad.exe").
+    Previously a process NAME was passed to /PID and always failed.
     """
+    by_pid = str(target).isdigit()
     if sys.platform.startswith("win"):
-        cmd = ["taskkill", "/F", "/PID", str(target)]
+        cmd = ["taskkill", "/F", "/PID" if by_pid else "/IM", str(target)]
     else:
-        cmd = ["kill", "-9", str(target)]
+        cmd = ["kill", "-9", str(target)] if by_pid else ["pkill", "-x", str(target)]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 

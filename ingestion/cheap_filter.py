@@ -24,7 +24,7 @@ import io
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def safe_decode(data: bytes, encoding: str = "utf-8") -> str:
@@ -85,6 +85,17 @@ _SUSPICIOUS_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"proxy\s*bypass", re.I), "proxy_bypass_attempt"),
     (re.compile(r"\btunnel(ing|ed)?\b.*\b(proxy|socks|http)\b", re.I), "proxy_tunnel_indicator"),
     (re.compile(r"X-Forwarded-For.*spoof", re.I), "forwarded_header_spoofing"),
+    # --- Vendor telemetry (Windows Security events, netflow, EDR) ---
+    # Previously absent: a Windows 4625 logon-failure burst never reached the LLM.
+    (re.compile(r"\bEventID=4625\b|failed to log on", re.I), "windows_logon_failure"),
+    (re.compile(r"\bEventID=4740\b", re.I), "windows_account_lockout"),
+    (re.compile(r"\bEventID=4672\b|special privileges assigned|added to .*\badministrators\b", re.I),
+     "privilege_assignment"),
+    (re.compile(r"\bEventID=4688\b.*(-nop\b|-w hidden|\bIEX\b|downloadstring)", re.I), "suspicious_process_creation"),
+    (re.compile(r"\bIEX\s*\(|downloadstring\(", re.I), "powershell_download_cradle"),
+    (re.compile(r"connection attempts to (?:[\d,]+ )?(?:sequential )?ports", re.I), "port_sweep"),
+    (re.compile(r"bytes_out=\d+(\.\d+)?\s?(GB|TB)|large egress", re.I), "large_egress"),
+    (re.compile(r"\bbeacon(ing)?\b", re.I), "beaconing"),
     # --- General malicious keywords ---
     (re.compile(r"unauthorized access", re.I), "unauthorized_access"),
     (re.compile(r"malware|trojan|ransomware", re.I), "explicit_threat_keyword"),
@@ -101,21 +112,46 @@ _TIMESTAMP_PATTERNS = [
 ]
 
 
+def _to_utc(ts: datetime) -> datetime:
+    # Every timestamp leaves this module UTC-aware. Mixing aware (ISO "Z")
+    # and naive ("%Y-%m-%d %H:%M:%S") datetimes used to raise TypeError in
+    # grouping's sort and kill the whole batch. Naive values are assumed UTC;
+    # year-less syslog stamps get the current year instead of 1900.
+    if ts.year == 1900:
+        ts = ts.replace(year=datetime.now(timezone.utc).year)
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
 def _try_parse_timestamp(text: str) -> datetime | None:
     # Look for an ISO-ish or syslog-ish timestamp token at the start of the line.
     candidate = text[:32].strip()
-    # Try ISO format
-    try:
-        val = candidate.replace("Z", "+00:00")
-        return datetime.fromisoformat(val)
-    except ValueError:
-        pass
+    # Longest prefix first, so "2026-06-23 22:00:09 msg" never degrades to the
+    # date-only token (midnight), which split real bursts into separate groups.
+    for n in (32, 29, 26, 25, 20, 19):
+        try:
+            return _to_utc(datetime.fromisoformat(candidate[:n].strip().replace("Z", "+00:00")))
+        except ValueError:
+            pass
     for fmt in _TIMESTAMP_PATTERNS:
         for token_len in (19, 15):
             try:
-                return datetime.strptime(candidate[:token_len].strip(), fmt)
+                return _to_utc(datetime.strptime(candidate[:token_len].strip(), fmt))
             except ValueError:
                 continue
+    return None
+
+
+def valid_ip(value: str) -> bool:
+    parts = value.split(".")
+    return len(parts) == 4 and all(p.isdigit() and int(p) <= 255 for p in parts)
+
+
+def _find_ip(text: str) -> str | None:
+    for m in _IP_PATTERN.finditer(text):
+        if valid_ip(m.group(0)):
+            return m.group(0)
     return None
 
 
@@ -140,8 +176,8 @@ def parse_log_file(
 
     # Check for custom delimiter override
     use_delim = None
-    if delimiter and delimiter != "None":
-        use_delim = delimiter
+    if delimiter and delimiter.strip().lower() not in ("none", "null", "auto", ""):
+        use_delim = "\t" if delimiter in ("\\t", "tab") else delimiter
 
     # 1. Detect JSON-Lines (JSONL)
     is_jsonl = False
@@ -165,17 +201,26 @@ def parse_log_file(
                         break
                 if not msg_val:
                     msg_val = json.dumps(data)
+                else:
+                    # Keep the structured context (ip, user, host, ...) next to the
+                    # message. Previously only the message reached Triage, so an
+                    # IP that lived in its own JSON field was invisible to the LLM.
+                    context = ", ".join(
+                        f"{k}={v}" for k, v in data.items()
+                        if k not in ("message", "msg", "log", "raw_text", "text", "event")
+                        and isinstance(v, (str, int, float, bool))
+                    )
+                    if context:
+                        msg_val = f"{msg_val} | {context}"
 
                 # Extract IP
                 extracted_ip = None
                 for k in ["ip", "src_ip", "dst_ip", "source_ip", "host", "hostname", "src"]:
-                    if k in data and re.match(r"^(?:\d{1,3}\.){3}\d{1,3}$", str(data[k])):
+                    if k in data and valid_ip(str(data[k])):
                         extracted_ip = str(data[k])
                         break
                 if not extracted_ip:
-                    ip_match = _IP_PATTERN.search(msg_val)
-                    if ip_match:
-                        extracted_ip = ip_match.group(0)
+                    extracted_ip = _find_ip(msg_val)
 
                 # Extract user
                 extracted_user = None
@@ -245,7 +290,14 @@ def parse_log_file(
         delim_char = use_delim if use_delim else ","
         f = io.StringIO(file_text)
         reader = csv.DictReader(f, delimiter=delim_char)
-        for row in reader:
+        for raw_row in reader:
+            # Ragged rows: DictReader files extra cells under the key None
+            # and missing cells as None values. Previously None.lower()
+            # raised AttributeError and failed the whole upload.
+            row = {str(k): ("" if v is None else str(v)) for k, v in raw_row.items() if k is not None}
+            extra = raw_row.get(None)
+            if extra:
+                row["_extra"] = " ".join(str(x) for x in extra)
             row_str = ", ".join(f"{k}={v}" for k, v in row.items())
 
             # Extract IP
@@ -254,19 +306,17 @@ def parse_log_file(
                 k_lower = k.lower()
                 if any(ip_kw in k_lower for ip_kw in ["ip", "host", "src", "dst"]):
                     val = str(row[k])
-                    if re.match(r"^(?:\d{1,3}\.){3}\d{1,3}$", val):
+                    if valid_ip(val):
                         extracted_ip = val
                         break
             if not extracted_ip:
-                ip_match = _IP_PATTERN.search(row_str)
-                if ip_match:
-                    extracted_ip = ip_match.group(0)
+                extracted_ip = _find_ip(row_str)
 
             # Extract User
             extracted_user = None
             for k in row:
                 k_lower = k.lower()
-                if any(u_kw in k_lower for u_kw in ["user", "username", "account", "login"]):
+                if any(u_kw in k_lower for u_kw in ["user", "username", "account", "login"]) and row[k]:
                     extracted_user = str(row[k])
                     break
             if not extracted_user:
@@ -325,7 +375,7 @@ def _parse_single_raw_line(line: str, default_log_type: str) -> ParsedLogLine:
         log_type = m.group(1).upper()
         message = m.group(2)
 
-    ip_match = _IP_PATTERN.search(message)
+    extracted_ip = _find_ip(message)
     user_match = _USER_PATTERN.search(message)
 
     is_suspicious = False
@@ -341,7 +391,7 @@ def _parse_single_raw_line(line: str, default_log_type: str) -> ParsedLogLine:
         log_type=log_type[:32],
         source="batch_upload",
         timestamp=_try_parse_timestamp(line),
-        extracted_ip=ip_match.group(0) if ip_match else None,
+        extracted_ip=extracted_ip,
         extracted_user=user_match.group(1) if user_match else None,
         is_suspicious=is_suspicious,
         match_reason=reason,

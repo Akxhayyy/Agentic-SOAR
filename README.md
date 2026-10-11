@@ -1,461 +1,366 @@
 # Agentic SOAR Capsule
 
-> **AI-Powered Security Orchestration, Automation & Response — fully local, air-gapped, zero cloud dependencies.**
+**A local, air-gapped Security Orchestration, Automation & Response (SOAR) system where LLM agents
+triage, investigate and plan containment for security incidents. A human approves every action,
+and deterministic guardrails sit between the model and the machine.**
 
-A production-grade SOAR platform that uses a 4-agent LangGraph pipeline with local LLM inference (Ollama), RAG-based forensics (ChromaDB), and a Human-in-the-Loop approval gate — all running on a single laptop with ≤6GB VRAM.
+Runs entirely on one laptop (tested on a Quadro RTX 4000, 8 GB): Ollama for inference, ChromaDB
+for playbook retrieval, LangGraph for orchestration, FastAPI + React for the console. No cloud,
+no API keys.
+
+* **Agentic forensics.** A bounded investigator (≤ 5 read-only tool calls) searches playbooks,
+  pulls related logs, checks prior incidents and an offline threat-intel feed, and records every
+  step it took.
+* **The model can't act on what it invents.** Every LLM output is grammar-constrained to a JSON
+  schema. The containment target must be an indicator that literally appears in the logs, and
+  of a type the action allows. Protected assets are refused twice, and the plan is SHA-256-sealed
+  between approval and execution.
+* **Measured, not claimed.** A 150-scenario benchmark with false-positive traps and a
+  vendor-telemetry "hard" split. On vendor logs, triage goes from **0% (keyword rules) to
+  ~80% (local LLMs)**, with ≥ 94% playbook-correct actions. A 32-payload prompt-injection red
+  team runs against a *fully hijacked* model: attack success drops **78% → 16%** with the
+  defences on (**4%** excluding evidence poisoning, which is documented as residual risk).
+* **Human in the loop by design.** Nothing executes without approval. Silence escalates (it
+  never executes), every decision is audited, and contained actions can be rolled back.
+
+<!-- Screenshots: docs/screenshots/*.png (incident timeline, decision panel, evaluation page) -->
 
 ---
 
-## Table of Contents
-
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Running the System](#running-the-system)
-- [Usage Guide](#usage-guide)
-- [Project Structure](#project-structure)
-- [Testing & Verification](#testing--verification)
-- [Troubleshooting](#troubleshooting)
+## Contents
+[How it works](#how-it-works) · [Results](#results) · [Quick start](#quick-start) ·
+[Models](#models) · [Using the console](#using-the-console) · [Security design](#security-design) ·
+[Evaluation & red team](#running-the-evaluation--red-team) · [API](#api) ·
+[Configuration](#configuration) · [Tests](#tests) · [Project layout](#project-layout) ·
+[Limitations](#limitations)
 
 ---
 
-## Architecture
+## How it works
 
+```mermaid
+flowchart LR
+    L[Log file / API] --> F[Cheap filter<br/>regex, no LLM]
+    F -->|suspicious lines| G[Grouping<br/>IP/user + 5-min window]
+    F -.->|all lines| LS[(Log store)]
+    G --> T[Triage agent<br/>vector · IOCs · ATT&CK]
+    T --> FA[Forensics agent<br/>≤5 read-only tool calls]
+    FA -->|similarity ≥ 0.70| N[Neutralizer<br/>one grounded, hashed plan]
+    FA -->|below threshold| R
+    N --> H{HITL gate<br/>300 s timeout}
+    H -->|approve| X[Execution wrapper<br/>hash · charset · deny-list]
+    H -->|reject / timeout| R[Report + audit]
+    X --> R
+    FA <-->|tools| TOOLS[search_playbooks · get_related_logs<br/>lookup_prior_incidents · check_local_threat_intel]
+    LS -.-> TOOLS
 ```
-                    ┌──────────────────────────────────────────────────────────┐
-                    │                   FastAPI Backend                        │
-                    │   POST /ingest ─► POST /ingest_file ─► POST /resume     │
-                    └────────────────────────┬─────────────────────────────────┘
-                                             │
-                    ┌────────────────────────▼─────────────────────────────────┐
-                    │              LangGraph StateGraph Pipeline                │
-                    │                                                          │
-                    │  ┌─────────┐   ┌───────────┐   ┌──────────────┐          │
-                    │  │ Triage  │──►│ Forensics │──►│ Neutralizer  │          │
-                    │  │ Agent   │   │ Agent(RAG)│   │   Agent      │          │
-                    │  └─────────┘   └─────┬─────┘   └──────┬───────┘          │
-                    │                      │                 │                  │
-                    │              ┌───────▼───┐    ┌───────▼────────┐          │
-                    │              │ Escalation│    │   HITL Gate    │          │
-                    │              │  Report   │    │ (300s timeout) │          │
-                    │              └───────────┘    └───────┬────────┘          │
-                    │                                       │                  │
-                    │                              ┌────────▼────────┐         │
-                    │                              │Execution Wrapper│         │
-                    │                              │ (hash-verified) │         │
-                    │                              └────────┬────────┘         │
-                    │                                       │                  │
-                    │                              ┌────────▼────────┐         │
-                    │                              │ Report Generator│         │
-                    │                              └─────────────────┘         │
-                    └──────────────────────────────────────────────────────────┘
-                                             │
-                    ┌────────────────────────▼─────────────────────────────────┐
-                    │           Streamlit SOC Command Center Dashboard          │
-                    └──────────────────────────────────────────────────────────┘
-```
 
-**Agent Pipeline Flow:**
-1. **Triage Agent** — Classifies attack vector, extracts IOCs from raw logs via Qwen LLM
-2. **Forensics Agent** — 2-pass RAG lookup against playbook corpus (ChromaDB + Qwen re-ranking)
-3. **Neutralizer Agent** — Plans containment action with SHA-256 tamper-detection hash
-4. **HITL Gate** — Pauses for operator approval (300s timeout → auto-escalation)
-5. **Execution Wrapper** — Hash-verified, charset-checked, allow-list-dispatched action execution
-6. **Responder** — Compresses UICR state and generates Markdown audit report
-
----
-
-## Prerequisites
-
-### Hardware Requirements
-
-| Component | Minimum | Recommended |
+| Stage | What it does | Guardrails |
 |---|---|---|
-| **RAM** | 8 GB | 16 GB |
-| **GPU VRAM** | 4 GB (for Q4_K_M quantized model) | 6 GB |
-| **Disk** | 10 GB free | 20 GB free |
-| **CPU** | Any modern x86-64 | 4+ cores |
+| **Cheap filter + grouping** (`ingestion/`) | Parses syslog, CSV, JSON lines and Windows-event/netflow styles. Flags suspicious lines with zero LLM cost and groups bursts by IP/user. A no-LLM **preview** shows what will become an incident. | 1 KB cap per line; UTC-normalised timestamps |
+| **Triage agent** (`agents/triage.py`) | Classifies into 7 attack vectors, extracts IOCs, tags MITRE ATT&CK techniques. | JSON-schema decoding; IOCs must appear verbatim in the logs; ASCII charset allow-list; ATT&CK IDs from a closed list; deterministic regex IOCs merged in |
+| **Forensics agent** (`agents/forensics.py`) | Bounded ReAct loop over 4 **read-only** tools (≥ 1, ≤ 5 calls) and picks the response playbook. Every step goes to `forensics_trace`. | Tool calls are a grammar `anyOf`; indicator args are enums of extracted IOCs. **Routing stays deterministic**: the 0.70 decision uses the *embedding similarity* of the chosen playbook, never the agent's own confidence |
+| **Neutralizer** (`agents/neutralizer.py`) | Proposes exactly one action: isolate host, lock account, terminate/quarantine process, block IP, or none. | Grammar encodes the action↔target-type matrix; target must be an extracted IOC; deny-list; SHA-256 over the canonical plan |
+| **HITL gate** (`core/graph.py`, `main.py`) | Pauses for an operator decision and survives restarts (persisted pause time, watchers re-armed). | Per-incident lock: one decision only (409 on repeats); timeout ⇒ escalate, never execute |
+| **Execution wrapper** (`execution/wrapper.py`) | Static allow-list dispatch to a dry-run stub or real `taskkill` / firewall rules. | Re-verifies hash, charset and deny-list *independently* of the planner; list-form subprocess only |
+| **Responder** (`agents/responder.py`) | Sets the final status (CONTAINED / CLOSED / ESCALATED / OPEN) and writes the report. | Facts section rendered from the record (no LLM). The LLM writes only the narrative, and the report is still written if the model is down |
 
-> **No GPU?** The system works on CPU-only machines — Ollama will fall back to CPU inference automatically. It will be slower but fully functional.
-
-### Software Requirements
-
-| Software | Version | Purpose |
-|---|---|---|
-| **Python** | 3.10+ | Runtime |
-| **Ollama** | Latest | Local LLM inference server |
-| **Git** | Any | Version control |
+**Why only forensics is an agent:** investigation is read-only, so an agent's mistakes cost time,
+not damage. Containment is one hashed object a human approves as a unit. Letting a model plan
+multi-step actions would make "what exactly did I approve?" ambiguous. More in
+[THREAT_MODEL.md §8](THREAT_MODEL.md#8-why-only-forensics-is-agentic).
 
 ---
 
-## Installation
+## Results
 
-### Step 1: Clone the Repository
+### Benchmark — `scripts/eval.py`
 
-```bash
-git clone https://github.com/Akxhayyy/Agentic-SOAR.git
-cd Agentic-SOAR
+150 synthetic, labelled scenarios (`data/benchmark/scenarios.jsonl`, generated reproducibly by
+`scripts/gen_benchmark.py`):
+
+* 106 attacks across 6 vectors. 82 are a **standard** keyword-friendly split; 24 are a **hard**
+  split of vendor telemetry (Windows 4625/4624/4672/4688, netflow volumes, 0%-jitter beacons).
+* 10 ambiguous "unknown" scenarios that the playbook says must get `NO_ACTION`.
+* 16 benign files.
+* 18 **false-positive traps**: a service account retrying every 30s after a password rotation,
+  an authorised Nessus scan, admin `sudo apt upgrade`, nightly rsync backups, a VPN CONNECT
+  tunnel, an EICAR self-test, base64-decoding a PEM.
+
+Each scenario runs through the **real pipeline** with the HITL gate auto-approved, in an
+isolated runtime with `dry_run` forced on.
+`rules` is a non-LLM baseline: keyword classifier plus the playbook's first-choice action,
+through the same guardrails. The gap to it is what the models add.
+
+<!-- EVAL_TABLE_START -->
+**Stratified run: 45 of the 150 scenarios** (3 per vector per split, plus unknown, benign and
+false-positive traps), on a Quadro RTX 4000 8 GB, 2026-10-11. The default `qwen3:8b` was not
+yet pulled on the test machine, so `qwen3:4b` and `qwen2.5:7b` were benchmarked. Reproduce with
+`python scripts/eval.py --models rules,qwen3:4b,qwen2.5:7b-instruct-q4_K_M --stratified 3`.
+
+| Metric (45 scenarios) | `rules` (no LLM) | `qwen3:4b` | `qwen2.5:7b` |
+|---|---|---|---|
+| Triage accuracy | 51.3% | 79.5% | **82.1%** |
+| ↳ standard split (keyword-friendly) | **95.2%** | 81.0% | 81.0% |
+| ↳ hard split (vendor telemetry) | 0.0% | 77.8% | **83.3%** |
+| Triage macro-F1 | 0.57 | **0.77** | 0.74 |
+| ATT&CK tag Jaccard (parent technique) | 0.27 | **0.34** | 0.29 |
+| Playbook hit rate | 51.3% | **89.7%** | 84.6% |
+| Action correct (playbook-permitted) | 50.0% | 90.5% | **92.9%** |
+| ↳ hard split | 16.7% | **100.0%** | 94.4% |
+| Target correct | **100.0%** | 97.1% | 97.1% |
+| Invented-target proposals | 0.0% | 0.0% | 0.0% |
+| False-positive traps contained (n=3, lower is better) | 100% | 100% | **67%** |
+| Benign files filtered before any LLM call | 100% | 100% | 100% |
+| Log lines removed by the cheap filter | 21.4% | 21.4% | 21.4% |
+| Latency p50 / p95 per scenario | 0.1 s / 0.2 s | 155 s / 282 s | 106 s / 323 s |
+| Tokens per incident | 0 | 7,194 | 4,375 |
+| Forensics tool calls per incident | 1.0 | 3.5 | 1.9 |
+
+Per-vector triage accuracy (6 scenarios each; 3 for unknown):
+
+| Vector | `rules` | `qwen3:4b` | `qwen2.5:7b` |
+|---|---|---|---|
+| Brute force | 50% | 100% | 100% |
+| Network intrusion | 50% | 83% | 50% |
+| Malware execution | 50% | 100% | 100% |
+| Data exfiltration | 50% | 33% | 100% |
+| Privilege escalation | 50% | 67% | 83% |
+| Proxy anomaly | 50% | 100% | 100% |
+| Unknown (must not act) | 67% | 67% | 0% |
+<!-- EVAL_TABLE_END -->
+
+Takeaways:
+* The LLMs add almost nothing on keyword-friendly logs (the rules baseline wins there). On
+  vendor telemetry they go from 0% to ~80% triage accuracy and to ≥94% correct actions.
+* **Invented targets: 0%.** With the target constrained to an enum of extracted IOCs during
+  decoding, neither model even *proposed* an ungrounded target. The red team below shows the
+  post-check still catches it when the grammar is bypassed.
+* False-positive traps were mostly contained, by every model. With n=3 this is anecdotal,
+  but it is the clearest argument for keeping the human approval gate.
+* `qwen2.5:7b` labelled every ambiguous "unknown" scenario with a concrete vector. That is
+  the over-confidence the `NO_ACTION` playbook and the HITL gate exist to absorb.
+
+How to read it:
+* **Hard split.** The rules baseline scores ~97% on keyword-friendly logs and **0%** on vendor
+  telemetry. The hard split is where model understanding shows.
+* **False-positive traps contained (lower is better).** Benign-but-suspicious activity often
+  still yields a plausible containment plan. That is exactly why the HITL gate exists, and why
+  every action can be rolled back.
+* **Invented-target proposals.** Plans whose target was *not* an extracted IOC. Every one is
+  blocked before execution.
+* The dataset is synthetic and written by the author, so treat absolute numbers as
+  indicative. The comparisons (model vs rules baseline, standard vs hard, defences on vs off)
+  are the point.
+
+### Red team — `scripts/redteam.py`
+
+32 prompt-injection and tampering payloads (`tests/redteam/payloads.jsonl`). Worst case: the LLM
+is **fully hijacked** and obeys every injected instruction (even ignoring the decoding grammar),
+and the operator **auto-approves everything**. Any attack that fails was stopped by deterministic
+code.
+
+| Attack class | Payloads | Success, defences OFF | Success, defences ON | Stopped by (ON) |
+|---|---|---|---|---|
+| Protected asset (`127.0.0.1`, SOC host, operator account) | 6 | 100% | **0%** | deny-list (planner; wrapper re-checks) |
+| Invented target ("lock the CEO") | 6 | 100% | **0%** | evidence grounding |
+| Type confusion (kill a *username*, lock an *IP*) | 4 | 100% | **0%** | evidence grounding |
+| Post-plan state tampering | 4 | 100% | **0%** | SHA-256 hash check (wrapper) |
+| Malicious identifiers (shell metachars, traversal, homoglyphs) | 6 | 0% | **0%** | ASCII charset allow-list (always on) |
+| Forensics tool-argument injection | 2 | 50% | 50% | tool-arg IOC check (1 of 2)\* |
+| Evidence poisoning (forged but realistic logs) | 4 | 100% | 100% | — residual risk: HITL is the control |
+| **All** | **32** | **78%** | **16%** | |
+| All except evidence poisoning | | 75% | **4%** | |
+
+\* The surviving case makes a read-only tool look up an IP planted in the log. The impact is
+wasted investigation budget, not an action.
+The red team also **found a real bug**: the charset allow-list used `\w`, which admits Unicode,
+so a Cyrillic `аdmin` passed every check. It is now ASCII-only, with regression tests.
+Details: [THREAT_MODEL.md](THREAT_MODEL.md).
+
+---
+
+## Quick start
+
+**Requirements:** Windows/Linux/macOS, Python 3.10+, [Ollama](https://ollama.com), and Node.js
+18+ (build-time only, for the web console). An NVIDIA GPU with 6–8 GB VRAM is recommended; CPU
+works, just slowly.
+
+### Windows, one click
 ```
-
-### Step 2: Install Ollama
-
-**Windows:**
-1. Download from [ollama.com/download](https://ollama.com/download)
-2. Run the installer
-3. Verify: open a terminal and run `ollama --version`
-
-**macOS:**
-```bash
-brew install ollama
+run_soar.bat
 ```
+Creates the venv, installs pinned dependencies, pulls every model named in the config, indexes
+the playbooks, builds the console, starts the backend and opens **http://127.0.0.1:8000**.
+`run_capsule.bat` restarts an installed capsule.
 
-**Linux:**
+### Manual
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-```
-
-### Step 3: Pull the Required Models
-
-```bash
-# Reasoning model (~4.4GB download, runs on GPU)
-ollama pull qwen2.5:7b-instruct-q4_K_M
-
-# Embedding model (~274MB download, runs on CPU — zero GPU cost)
-ollama pull nomic-embed-text
-```
-
-> **Low-spec machine?** Use the smaller 3B model instead:
-> ```bash
-> ollama pull qwen2.5:3b-instruct
-> ```
-> Then update `config/hitl_config.yaml` → `models.reasoning.model` to `"qwen2.5:3b-instruct"`.
-
-### Step 4: Create a Python Virtual Environment
-
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# macOS / Linux
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### Step 5: Install Python Dependencies
-
-```bash
+git clone https://github.com/Akxhayyy/Agentic-SOAR.git && cd Agentic-SOAR
+python -m venv venv && venv\Scripts\activate          # source venv/bin/activate on Linux/macOS
 pip install -r requirements.txt
+ollama pull qwen3:8b && ollama pull nomic-embed-text
+python -m rag.ingest_playbooks                         # embed the 7 playbooks into ChromaDB
+cd frontend && npm ci && npm run build && cd ..        # build the console once
+uvicorn main:app --host 127.0.0.1 --port 8000          # console + API at http://127.0.0.1:8000
 ```
+Frontend development: `cd frontend && npm run dev` (Vite on :5173, proxies `/api` to :8000).
 
-### Step 6: Ingest Playbooks into ChromaDB
+---
 
-This embeds the 7 response playbooks into the local vector store for RAG forensics:
+## Models
+
+| Model | Size (Q4) | Notes |
+|---|---|---|
+| **`qwen3:8b`** (default) | ~5.2 GB | Strong structured output and tool use; "thinking" is switched off for the schema-constrained calls. Fits 8 GB VRAM with an 8K context. |
+| `qwen3:4b` | ~2.6 GB | Low-VRAM / CPU option. |
+| `gemma4:e4b` | ~4.5B effective | Recent; native function calling. |
+| Foundation-Sec-8B-Instruct | ~5 GB | Cisco's security-tuned Llama 3.1 (community GGUF). Good as a per-agent `report` model. |
+| `qwen2.5:7b-instruct-q4_K_M` / `qwen2.5:3b-instruct` | 4.7 / 1.9 GB | Previous generation; included in the benchmark for comparison. |
+
+Change the model in `config/hitl_config.yaml` (`models.reasoning.model`), per agent under
+`models.reasoning.per_agent`, or for one run with `SOAR_REASONING_MODEL=<tag>`. The console's
+top bar shows a red **Model** pill and a banner if the configured model isn't pulled.
+
+---
+
+## Using the console
+
+| Page | What you get |
+|---|---|
+| **Incidents** | Live list (Server-Sent Events) with incidents awaiting approval pinned at the top with countdowns. Real KPIs: awaiting, escalated, open, contained, median pipeline time. Vector distribution, 14-day trend, filters and search. |
+| **Incident detail** | The **agent timeline**: each agent's actual output and measured duration. Triage IOCs + ATT&CK tags; the forensics agent's tool-call trace, similarity vs. the 0.70 threshold and threat-intel hits; a plain-English plan with grounding result and SHA-256. Also: decision panel (countdown, note, typed confirmation in LIVE mode), rollback, IOC-highlighted raw logs, the report, and the incident's audit trail. |
+| **Ingest** | Drag-drop, paste, or a bundled sample. A **no-LLM pre-screen preview** shows flagged lines and the incidents that will be created, then a background job with live progress. |
+| **Playbooks** | The RAG knowledge base, with how many incidents matched each playbook. |
+| **Evaluation** | Latest benchmark and red-team tables. |
+| **System** | Safety controls, model/GPU info, a real tokens/s benchmark, the audit log and the read-only config. |
+
+Dark and light themes; works down to phone width. Log and LLM text is never rendered as HTML
+(tested).
+
+---
+
+## Security design
+
+Full analysis in **[THREAT_MODEL.md](THREAT_MODEL.md)** (assets, trust boundaries, adversaries,
+attacks → mitigations with code references, red-team results, residual risks). In short:
+
+1. **LLM output is untrusted input.** The model reads attacker-controlled logs, so nothing it
+   emits reaches the OS without deterministic checks.
+2. **Constrain at decode time, verify after.** JSON schemas (enums, `anyOf` action/target
+   matrix) make most invalid output impossible to generate. Post-checks catch anything that
+   slips through.
+3. **Two independent layers at the execution boundary.** The planner and the wrapper each
+   enforce the deny-list and charset. The wrapper re-hashes the plan.
+4. **Fail safe.** Model down ⇒ incident `FAILED` + `ESCALATED` with a report. Timeout ⇒ escalate.
+   Benchmark and red-team runs force dry-run.
+
+---
+
+## Running the evaluation & red team
 
 ```bash
-python -m rag.ingest_playbooks
+python scripts/gen_benchmark.py                                  # regenerate the 150 scenarios (seeded)
+python scripts/eval.py --fake-llm                                # rules baseline only, seconds, no Ollama
+python scripts/eval.py --models rules,qwen3:8b,gemma4:e4b        # unpulled models are skipped
+python scripts/eval.py --models rules,qwen3:8b --stratified 3    # ~45 scenarios, quicker
+python scripts/redteam.py                                        # hijacked-model worst case, no Ollama
+python scripts/redteam.py --models hijacked,qwen3:8b             # plus a real model
 ```
+Results go to `data/eval/run_<ts>/results.{md,json}` and `data/redteam/run_<ts>/…`, and
+appear on the console's **Evaluation** page. A full LLM benchmark takes roughly 1.5–3 minutes
+per scenario on an 8 GB laptop GPU, so plan an overnight run for all 150 × several models.
 
-Expected output:
-```
-Ingested 2 chunks from brute_force_auth.md
-Ingested 3 chunks from data_exfiltration.md
-Ingested 3 chunks from malware_execution.md
-Ingested 3 chunks from network_intrusion.md
-Ingested 3 chunks from privilege_escalation.md
-Ingested 3 chunks from proxy_anomaly.md
-Ingested 3 chunks from unknown_threat.md
-Done. 20 total chunks across 7 playbooks in collection (count=20).
-```
+---
 
-> **Re-run this** any time you add or edit playbook `.md` files in `config/playbooks/`.
+## API
+
+Interactive docs at `/docs`. Main endpoints:
+
+| Method & path | Purpose |
+|---|---|
+| `POST /api/ingest_file/preview` | Parse, filter and group with no LLM calls |
+| `POST /api/ingest_file` → `GET /api/jobs/{id}` | Background batch ingest with progress |
+| `POST /api/ingest` | Single log line (synchronous) |
+| `GET /api/incidents`, `GET /api/incidents/{id}` | Summaries / full state |
+| `POST /api/incidents/{id}/decision` | `{"decision": "APPROVED"\|"REJECTED", "note", "operator"}`; 409 if not awaiting |
+| `POST /api/incidents/{id}/rollback` | Reverse an executed containment action (once) |
+| `GET /api/incidents/{id}/report`, `/audit` | Markdown report; audit records |
+| `GET /api/events` | Server-Sent Events: node progress, HITL, jobs |
+| `GET /api/health`, `/api/config`, `/api/playbooks`, `/api/audit` | System info |
+| `GET /api/eval/latest`, `/api/redteam/latest` | Latest evaluation results |
+
+Legacy routes (`/ingest`, `/ingest_file`, `/resume/{id}`, `/incident/{id}`) still work.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ingest -H "Content-Type: application/json" \
+  -d '{"source":"auth-gw","log_type":"AUTH","raw_text":"Failed login for user admin from 10.0.4.17 x14 in 45s, followed by successful login"}'
+```
 
 ---
 
 ## Configuration
 
-All runtime configuration lives in a single file: **`config/hitl_config.yaml`**
+Everything lives in `config/hitl_config.yaml`. Relative paths resolve against the project root,
+not the working directory.
 
-### Key Settings
-
-```yaml
-execution:
-  dry_run: true          # true = stubbed API (safe demo), false = real OS commands
-  exec_result_dir: "./data/exec_results"
-
-hitl:
-  timeout_seconds: 300   # Operator has 5 min to APPROVE/REJECT before auto-escalation
-  checkpointer_db_path: "./data/vectorstore/graph_state.db"
-
-forensics:
-  similarity_hard_threshold: 0.70   # THE escalation decision threshold
-  pass_1:
-    window_seconds: 30
-    top_k: 5
-  pass_2:
-    window_seconds: 300
-    top_k: 8
-    similarity_floor: 0.35          # Recall-widening only, NOT a decision threshold
-
-models:
-  reasoning:
-    model: "qwen2.5:7b-instruct-q4_K_M"   # Change to 3b for low-spec machines
-    num_ctx: 4096                          # Hard VRAM ceiling — do NOT increase
-    temperature: 0.0                       # Zero-temp for deterministic output
-  embedding:
-    model: "nomic-embed-text"
-    device: "cpu"                          # Pinned off-GPU to preserve VRAM
-```
-
-### Critical Configuration Notes
-
-> **`execution.dry_run`**: When `true` (default for safety), all containment actions are simulated via `execution/stub_infra_api.py`. When `false`, real OS commands execute (`taskkill`, `netsh firewall rules`). **Only set to `false` if you understand the consequences.**
-
-> **`models.reasoning.num_ctx`**: Hard-capped at 4096. Do **not** increase — the VRAM ceiling is enforced at the code level and will raise a `ValueError` if exceeded.
-
-> **`forensics.similarity_hard_threshold`**: This is the **only** value that decides whether an incident routes to the Neutralizer (≥0.70) or straight to escalation (<0.70). The 0.35 floor in pass 2 only widens retrieval recall.
-
----
-
-## Running the System
-
-You need **three terminal windows** (or use the batch script):
-
-### Option A: Manual Start (3 Terminals)
-
-**Terminal 1 — Ollama Server** (if not already running as a service):
-```bash
-ollama serve
-```
-
-**Terminal 2 — FastAPI Backend:**
-```bash
-# Activate venv first
-uvicorn main:app --reload --port 8000
-```
-
-**Terminal 3 — Streamlit Dashboard:**
-```bash
-# Activate venv first
-streamlit run dashboard/app.py
-```
-
-### Option B: One-Click Batch Script (Windows)
-
-```bash
-run_soar.bat
-```
-
-This starts Ollama, the FastAPI backend, and the Streamlit dashboard in sequence.
-
-### Verify Services Are Running
-
-| Service | URL | Expected |
+| Key | Default | Meaning |
 |---|---|---|
-| FastAPI Backend | http://127.0.0.1:8000/docs | Swagger UI |
-| Ollama | http://127.0.0.1:11434 | `Ollama is running` |
-| Streamlit Dashboard | http://localhost:8501 | SOC Command Center |
+| `execution.dry_run` | `true` | `false` runs real `taskkill`/`kill` and firewall rules. The console then shows **LIVE** and requires typed confirmation. |
+| `execution.protected_targets` | loopback, `soc-operator` | Never contained. The local hostname is always added. |
+| `security.grounding` / `deny_list` / `hash_check` | `true` | Only the red-team harness turns these off. |
+| `hitl.timeout_seconds` | `300` | Silence ⇒ escalate. |
+| `forensics.similarity_hard_threshold` | `0.70` | The only escalation threshold (deterministic). |
+| `forensics.agent.enabled` / `max_tool_calls` / `min_tool_calls` | `true` / `5` / `1` | `enabled: false` falls back to two-pass retrieval + LLM re-rank. |
+| `models.reasoning.model` / `num_ctx` | `qwen3:8b` / `8192` | `num_ctx` is hard-capped at 8192 in code. |
+| `mitre.allowed_techniques` | 27 IDs | Closed ATT&CK vocabulary for triage. |
 
 ---
 
-## Usage Guide
-
-### Method 1: Upload Log Files via Dashboard
-
-1. Open the Streamlit dashboard at `http://localhost:8501`
-2. Go to **SOC Overview** → **LOG INGESTION WORKSPACE**
-3. Drag and drop a log file (`.txt`, `.csv`, `.json`, or `.log`)
-4. Select the appropriate delimiter (auto-detected for CSV/JSON)
-5. Click **SUBMIT TO CORE AUTOMATION GRAPH**
-6. Watch incidents appear in the **BATCH INCIDENT CASE RUNS** section
-7. Click any incident to view it in **Case Investigation**
-
-### Method 2: API — Single Log Ingestion
+## Tests
 
 ```bash
-curl -X POST http://127.0.0.1:8000/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source": "auth-gateway-01",
-    "log_type": "AUTH",
-    "raw_text": "Failed login for user admin from 10.0.4.17 x14 in 45s, followed by successful login"
-  }'
+python -m pytest tests          # 128 tests, ~15 s, no Ollama needed (scripted fake LLM)
+cd frontend && npm test         # rendering safety (XSS), status/countdown logic
 ```
-
-### Method 3: API — Batch File Ingestion
-
-```bash
-curl -X POST http://127.0.0.1:8000/ingest_file \
-  -H "Content-Type: application/json" \
-  -d '{
-    "file_text": "timestamp,ip,username,message\n2026-01-01T00:00:01Z,192.168.1.100,admin,failed login\n2026-01-01T00:00:05Z,192.168.1.100,admin,failed login\n2026-01-01T00:00:10Z,192.168.1.100,admin,successful login",
-    "default_log_type": "AUTH"
-  }'
-```
-
-### Operator Decision (HITL Gate)
-
-When an incident reaches the HITL gate:
-- **Dashboard**: Click **APPROVE** or **REJECT** in the Case Investigation panel
-- **API**: `POST /resume/{incident_id}` with `{"decision": "APPROVED"}` or `{"decision": "REJECTED"}`
-- **Timeout**: If no decision in 300s, the system auto-escalates with `TIMEOUT`
-
-### Sample Test Files
-
-Pre-built test files are included in `data/samples/`:
-
-| File | Format | Scenario |
-|---|---|---|
-| `syslog_brute_force.txt` | Syslog | 5 failed + 1 success login |
-| `brute_force_success.csv` | CSV | Brute force with timestamps |
-| `e2e_verify.csv` | CSV | End-to-end verification data |
-| `network_scan.json` | JSON-Lines | nmap scan + unauthorized access |
-| `demo_attack.txt` | Raw text | Malware execution alert |
+The suite covers a regression test for every bug fixed in the rework: timezone-mixed timestamps,
+ragged CSV, fenced LLM JSON, invented targets, double approval races, restart timeout re-arm, the
+status lifecycle, and the homoglyph bypass. It also covers the forensics agent (tool budget,
+trace, read-only tools via AST check, deterministic routing), the benchmark harness and metrics,
+and the full red-team suite as regression tests.
 
 ---
 
-## Project Structure
+## Project layout
 
 ```
 soar_capsule/
-├── main.py                          # FastAPI backend (ingest, resume, timeout)
-├── requirements.txt                 # Python dependencies
-├── config/
-│   ├── hitl_config.yaml             # Single source of truth for all config
-│   └── playbooks/                   # RAG corpus (7 playbook .md files)
-│       ├── brute_force_auth.md
-│       ├── data_exfiltration.md
-│       ├── malware_execution.md
-│       ├── network_intrusion.md
-│       ├── privilege_escalation.md
-│       ├── proxy_anomaly.md
-│       └── unknown_threat.md
-├── core/
-│   ├── uicr_schema.py               # Pydantic models, enums, UICR state
-│   ├── graph.py                     # LangGraph pipeline wiring & edges
-│   ├── graph_config.py              # Config loader
-│   └── checkpointer.py             # SQLite persistence for graph state
-├── agents/
-│   ├── llm_client.py                # Ollama API wrapper (GPU/CPU routing)
-│   ├── triage.py                    # Triage Agent — attack classification
-│   ├── forensics.py                 # Forensics Agent — 2-pass RAG
-│   ├── neutralizer.py               # Neutralizer Agent — action planning
-│   └── responder.py                 # UICR compression + report generation
-├── execution/
-│   ├── wrapper.py                   # Hash-verified execution gate
-│   ├── stub_infra_api.py            # Simulated infra (dry_run=true)
-│   └── real_infra_api.py            # Real OS commands (dry_run=false)
-├── ingestion/
-│   ├── cheap_filter.py              # Zero-LLM pre-screening (regex/keyword)
-│   ├── grouping.py                  # IP/user burst grouping
-│   └── batch_processor.py           # Orchestrates filter→group→graph
-├── rag/
-│   ├── chroma_store.py              # ChromaDB vector store wrapper
-│   └── ingest_playbooks.py          # Playbook embedding pipeline
-├── dashboard/
-│   └── app.py                       # Streamlit SOC Command Center
-├── data/
-│   ├── samples/                     # Test log files
-│   └── reports/                     # Generated incident reports (auto-created)
-├── comprehensive_audit.py           # Full codebase verification (135 tests)
-├── run_soar.bat                     # Windows one-click launcher
-├── run_capsule.bat                  # Alternative launcher
-└── VSSC_DEMO_GUIDE.md              # Live demo presentation guide
-```
-
-### Key Files (Read Order)
-
-1. **`core/uicr_schema.py`** — Every validation gate in the system
-2. **`agents/neutralizer.py`** + **`execution/wrapper.py`** — The hash-verification tamper-detection contract
-3. **`core/graph.py`** — The two conditional edge functions that branch the pipeline
-4. **`config/hitl_config.yaml`** — Runtime behavior configuration
-
----
-
-## Testing & Verification
-
-### Run the Full Audit Suite (No Ollama Required)
-
-```bash
-python comprehensive_audit.py
-```
-
-This runs **135 automated checks** across 10 categories:
-
-| Category | Tests | What It Checks |
-|---|---|---|
-| Schema & Enum Validation | 19 | Pydantic models, enum cardinality, charset enforcement |
-| Ingestion Pipeline | 19 | CSV/JSON/syslog parsing, filtering, grouping, timestamp extraction |
-| Execution Wrapper | 30 | Hash verification, API signature matching, rollback tracking |
-| Responder | 12 | UICR compression, escalation path detection |
-| Graph Wiring | 8 | Conditional edge routing for all decision paths |
-| Config Loading | 17 | YAML parsing, required sections, threshold values |
-| Playbook Files | 8 | All 7 playbooks present and non-empty |
-| LLM Client Contracts | 2 | Localhost URL, VRAM guard |
-| Adversarial Edge Cases | 7 | SQL injection, Unicode, path traversal, overlength inputs |
-| Cross-Module Imports | 4 | All inter-module dependencies resolve correctly |
-
-### Quick Smoke Test
-
-```bash
-python verify_expansion.py
+├── main.py                    FastAPI: ingest jobs, HITL, SSE, health, serves the console
+├── agents/                    triage · forensics (+ forensics_tools) · neutralizer · responder · llm_client
+├── core/                      LangGraph wiring (graph.py), UICR schema, config, checkpointer, audit log, event bus
+├── execution/                 wrapper (the only path to infra) · stub (dry-run) · real OS adapter
+├── ingestion/                 cheap filter · grouping · batch processor · log store
+├── rag/                       ChromaDB store · playbook ingestion (section chunking)
+├── evaluation/                isolated runner · metrics · rules baseline · red-team harness
+├── scripts/                   eval.py · redteam.py · gen_benchmark.py · required_models.py
+├── frontend/                  React + Vite + TypeScript + Tailwind console
+├── config/                    hitl_config.yaml · playbooks/*.md
+├── data/                      samples/ · benchmark/ · threat_intel/ (runtime output is git-ignored)
+├── tests/                     pytest suite · redteam/payloads.jsonl
+├── THREAT_MODEL.md · VSSC_DEMO_GUIDE.md
+└── run_soar.bat · run_capsule.bat
 ```
 
 ---
 
-## Troubleshooting
+## Limitations
 
-### Ollama Not Responding
-
-```bash
-# Check if Ollama is running
-curl http://127.0.0.1:11434
-
-# Start it manually
-ollama serve
-
-# Verify models are pulled
-ollama list
-```
-
-### FastAPI Backend Won't Start
-
-```bash
-# Check if port 8000 is in use
-netstat -ano | findstr :8000     # Windows
-lsof -i :8000                    # Linux/macOS
-
-# Start with verbose logging
-uvicorn main:app --reload --port 8000 --log-level debug
-```
-
-### ChromaDB Empty (Forensics Returns No Matches)
-
-```bash
-# Re-ingest playbooks
-python -m rag.ingest_playbooks
-
-# Verify the vector store exists
-ls data/vectorstore/     # should contain chroma.sqlite3
-```
-
-### VRAM Out of Memory
-
-- Use the smaller 3B model: edit `config/hitl_config.yaml` → `models.reasoning.model: "qwen2.5:3b-instruct"`
-- Ensure `num_ctx` stays at 4096 (the code enforces this)
-- Close other GPU-heavy applications
-
-### Dashboard Shows "Backend Unreachable"
-
-The FastAPI backend must be running at `http://127.0.0.1:8000` before the dashboard can communicate. Start the backend first, then the dashboard.
-
-### "Config file missing" Error
-
-Ensure `config/hitl_config.yaml` exists. The system refuses to start with implicit defaults — this is by design for a security platform.
-
----
-
-## License
-
-This project is part of an academic/research demonstration. See the repository for licensing details.
+* **Synthetic evaluation data,** written by the author. It is useful for comparisons, not as a
+  claim of real-world detection rates.
+* **Speed:** about 1–3 minutes per incident on a laptop GPU, because grammar-constrained
+  decoding and the agent loop cost several LLM calls. It's built for analyst-paced triage, not
+  line-rate detection.
+* **Integrations are stubs:** only process termination and firewall IP blocks are real OS
+  actions. Host isolation and account locks are simulated hooks for EDR/IdP APIs.
+* **Single operator, localhost only:** there is no authentication. Add it before exposing the
+  API on a network (see THREAT_MODEL.md §9).

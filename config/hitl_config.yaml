@@ -1,8 +1,9 @@
 # config/hitl_config.yaml
 #
-# Single source of truth for runtime behavior. The app must fail loudly at
+# Single source of truth for runtime behavior. The app fails loudly at
 # startup (not silently default) if this file is missing or malformed —
-# see core/graph.py:load_config().
+# see core/graph_config.py:load_config(). Relative paths are resolved
+# against the project root, never the process CWD.
 
 execution:
   # When true, execution/wrapper.py routes all actions through
@@ -11,6 +12,22 @@ execution:
   # underlying API client is swapped.
   dry_run: true
   exec_result_dir: "./data/exec_results"
+  report_dir: "./data/reports"
+  # Targets the Neutralizer may NEVER act on, regardless of what the LLM
+  # proposes. Checked in agents/neutralizer.py AND independently in
+  # execution/wrapper.py. Case-insensitive exact match.
+  protected_targets:
+    - "127.0.0.1"
+    - "localhost"
+    - "0.0.0.0"
+    - "soc-operator"
+
+security:
+  # Defence toggles. ALWAYS true in normal operation; only the red-team
+  # harness (scripts/redteam.py) switches them off to measure their effect.
+  grounding: true        # Neutralizer target must be an extracted IOC of a compatible type
+  deny_list: true        # execution.protected_targets enforced (Neutralizer + wrapper)
+  hash_check: true       # wrapper re-verifies the plan SHA-256 before acting
 
 hitl:
   timeout_seconds: 300
@@ -19,33 +36,76 @@ hitl:
 forensics:
   similarity_hard_threshold: 0.70   # the ONLY value the escalation edge checks
   pass_1:
-    window_seconds: 30
     top_k: 5
   pass_2:
-    window_seconds: 300             # ±5m
     top_k: 8
     similarity_floor: 0.35          # recall-only param, NOT a decision threshold
   chroma_persist_dir: "./data/vectorstore"
   playbook_dir: "./config/playbooks"
+  log_store_path: "./data/logstore.db"             # every ingested line, for get_related_logs
+  threat_intel_path: "./data/threat_intel/blocklist.csv"
+  # Tool-using investigator. Read-only tools only; at most max_tool_calls
+  # tool invocations before a forced final answer. The 0.70 routing decision
+  # stays deterministic (embedding similarity of the chosen playbook).
+  # enabled: false falls back to the classic 2-pass retrieve + LLM re-rank.
+  agent:
+    enabled: true
+    max_tool_calls: 5
+    min_tool_calls: 1          # "final" is not offered until at least this many tool calls
+    related_logs_default_window_s: 300
 
 models:
   reasoning:
     provider: "ollama"
-    model: "qwen2.5:7b-instruct-q4_K_M"
-    num_ctx: 4096
+    # Default for an 8GB GPU (e.g. Quadro RTX 4000): Qwen3 8B, Q4_K_M (~5.2GB).
+    #   ollama pull qwen3:8b
+    # Low-VRAM / CPU alternative: "qwen3:4b". Override at runtime with the
+    # SOAR_REASONING_MODEL environment variable.
+    model: "qwen3:8b"
+    num_ctx: 8192             # fits an 8B Q4 model + KV cache in 8GB VRAM
     temperature: 0.0          # zero-temp for all schema-constrained parsing
-    max_vram_gb: 4
+    # Optional per-agent model overrides (agents: triage, forensics_rerank,
+    # neutralizer, report). Only one model is resident at a time
+    # (OLLAMA_MAX_LOADED_MODELS=1), so mixing models costs reload time.
+    # Example — security-tuned report writer:
+    #   report: "hf.co/gabriellarson/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+    per_agent: {}
   embedding:
     provider: "ollama"
     model: "nomic-embed-text"
     device: "cpu"             # explicitly pinned off-GPU; 0-byte VRAM cost
 
-dashboard:
-  layout:
-    left_pct: 30
-    center_pct: 45
-    right_pct: 25
-  refresh_interval_ms: 1000
+mitre:
+  # Closed vocabulary of ATT&CK technique IDs the Triage agent may tag.
+  # IDs outside this list are dropped (and recorded), never trusted.
+  allowed_techniques:
+    T1110: "Brute Force"
+    T1110.001: "Brute Force: Password Guessing"
+    T1110.003: "Brute Force: Password Spraying"
+    T1110.004: "Brute Force: Credential Stuffing"
+    T1078: "Valid Accounts"
+    T1021: "Remote Services"
+    T1021.004: "Remote Services: SSH"
+    T1059: "Command and Scripting Interpreter"
+    T1059.001: "Command and Scripting Interpreter: PowerShell"
+    T1059.004: "Command and Scripting Interpreter: Unix Shell"
+    T1027: "Obfuscated Files or Information"
+    T1105: "Ingress Tool Transfer"
+    T1204: "User Execution"
+    T1486: "Data Encrypted for Impact"
+    T1041: "Exfiltration Over C2 Channel"
+    T1048: "Exfiltration Over Alternative Protocol"
+    T1567: "Exfiltration Over Web Service"
+    T1068: "Exploitation for Privilege Escalation"
+    T1548: "Abuse Elevation Control Mechanism"
+    T1548.003: "Abuse Elevation Control Mechanism: Sudo and Sudo Caching"
+    T1222: "File and Directory Permissions Modification"
+    T1046: "Network Service Discovery"
+    T1595: "Active Scanning"
+    T1190: "Exploit Public-Facing Application"
+    T1090: "Proxy"
+    T1572: "Protocol Tunneling"
+    T1071: "Application Layer Protocol"
 
 logging:
   level: "INFO"

@@ -2,9 +2,13 @@
 rag/ingest_playbooks.py
 
 Run once (or any time you add/edit a playbook .md file under
-config/playbooks/). Idempotent: re-running re-embeds and upserts by
-deterministic chunk ID (filename + chunk index), so duplicate runs don't
-create duplicate vectors.
+config/playbooks/). Idempotent: the collection is rebuilt from scratch on
+every run, so edits and deletions are reflected and no stale vectors remain.
+
+Chunking is by markdown "## " section (Detection / Containment / Escalation /
+False Positives), with the playbook title prepended to every chunk so each
+vector carries its playbook context. Oversized sections fall back to a
+fixed-size character split.
 
 Usage:
     python -m rag.ingest_playbooks
@@ -16,23 +20,45 @@ import hashlib
 from pathlib import Path
 
 from core.graph_config import load_config
-from rag.chroma_store import _get_collection, ensure_cosine_collection, _embedding_model_name
+from rag.chroma_store import DOCUMENT_PREFIX, _embedding_model_name, reset_collection
 from agents.llm_client import call_embedding_model
 
 CHUNK_SIZE_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 150
 
 
-def _chunk_text(text: str) -> list[str]:
-    chunks = []
-    start = 0
+def _split_fixed(text: str) -> list[str]:
+    chunks, start = [], 0
     while start < len(text):
         end = start + CHUNK_SIZE_CHARS
         chunks.append(text[start:end])
-        start = end - CHUNK_OVERLAP_CHARS
-        if start <= 0:
+        if end >= len(text):  # previously re-emitted a duplicate tail chunk
             break
-    return [c for c in chunks if c.strip()]
+        start = end - CHUNK_OVERLAP_CHARS
+    return chunks
+
+
+def _chunk_text(text: str) -> list[str]:
+    lines = text.splitlines()
+    title = next((l for l in lines if l.startswith("# ")), "").strip()
+    sections: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        if line.startswith("## ") and current:
+            sections.append("\n".join(current))
+            current = []
+        if not line.startswith("# "):
+            current.append(line)
+    if current:
+        sections.append("\n".join(current))
+
+    chunks: list[str] = []
+    for section in sections:
+        if not section.strip():
+            continue
+        for piece in _split_fixed(section.strip()):
+            chunks.append(f"{title}\n{piece}" if title else piece)
+    return chunks
 
 
 def _deterministic_chunk_id(filename: str, chunk_index: int) -> str:
@@ -46,8 +72,7 @@ def ingest_all():
     if not playbook_dir.exists():
         raise FileNotFoundError(f"Playbook directory not found: {playbook_dir}")
 
-    ensure_cosine_collection()
-    collection = _get_collection()
+    collection = reset_collection()
     embedding_model = _embedding_model_name()
 
     md_files = sorted(playbook_dir.glob("*.md"))
@@ -63,7 +88,7 @@ def ingest_all():
         ids, embeddings, documents, metadatas = [], [], [], []
         for i, chunk in enumerate(chunks):
             chunk_id = _deterministic_chunk_id(md_file.name, i)
-            embedding = call_embedding_model(chunk, model=embedding_model)
+            embedding = call_embedding_model(DOCUMENT_PREFIX + chunk, model=embedding_model)
             ids.append(chunk_id)
             embeddings.append(embedding)
             documents.append(chunk)

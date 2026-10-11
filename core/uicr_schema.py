@@ -89,6 +89,7 @@ class PipelinePhase(str, Enum):
     EXECUTING = "EXECUTING"
     COMPRESSING = "COMPRESSING"
     REPORTED = "REPORTED"
+    FAILED = "FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +99,12 @@ class PipelinePhase(str, Enum):
 
 # Regex used at BOTH the Pydantic layer and re-checked independently inside
 # execution/wrapper.py. Allow-list only: word chars, dot, colon, hyphen, @.
-SAFE_TOKEN_PATTERN = r"^[\w.:\-@]+$"
+#
+# ASCII ONLY. This used to be r"^[\w.:\-@]+$", but Python's \w matches any
+# Unicode letter, so a Cyrillic homoglyph ("аdmin") passed the allow-list and
+# could be locked/isolated in place of the real account (found by the red
+# team, tests/redteam rt-21).
+SAFE_TOKEN_PATTERN = r"^[A-Za-z0-9_.:\-@]+$"
 
 
 class RawLogEntry(BaseModel):
@@ -144,6 +150,9 @@ class TriageResult(BaseModel):
     iocs: list[IOC] = Field(default_factory=list, max_length=50)
     triage_summary: str = Field(..., max_length=512)
     triage_confidence: float = Field(..., ge=0.0, le=1.0)
+    # ATT&CK technique IDs, filtered against config mitre.allowed_techniques
+    # in agents/triage.py (invalid IDs are dropped, never fatal).
+    mitre_techniques: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("discovered_layout")
     @classmethod
@@ -169,6 +178,17 @@ class ForensicsResult(BaseModel):
     final_similarity_score: float = Field(..., ge=0.0, le=1.0)
     cleared_threshold: bool  # True only if final_similarity_score >= 0.70
     rag_timeline_notes: str = Field(default="", max_length=1024)
+    best_playbook: str = Field(default="", max_length=128)   # source file of the top match
+    rerank_reason: str = Field(default="", max_length=512)   # pass-2 LLM re-rank rationale
+    # Tool-using investigator (agents/forensics.py). The agent's own confidence
+    # is recorded but NEVER used for routing — final_similarity_score is the
+    # embedding similarity of the playbook it chose.
+    mode: str = Field(default="two_pass", max_length=16)     # "agent" | "two_pass"
+    agent_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    agent_rationale: str = Field(default="", max_length=512)
+    intel_hits: list[dict] = Field(default_factory=list, max_length=20)
+    related_log_count: int = Field(default=0, ge=0)
+    prior_incidents: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ActionPlan(BaseModel):
@@ -187,6 +207,10 @@ class ActionPlan(BaseModel):
     params: dict[str, str] = Field(default_factory=dict)
     justification: str = Field(..., max_length=512)
     payload_hash: str = Field(..., min_length=64, max_length=64)  # hex sha256
+    # Outcome of the evidence-grounding check in agents/neutralizer.py. Not
+    # part of the hashed payload — it describes the plan, it doesn't drive it.
+    grounded: bool = True
+    grounding_note: str = Field(default="", max_length=256)
 
     @field_validator("target")
     @classmethod
@@ -245,8 +269,20 @@ class UICRState(TypedDict, total=False):
 
     report_path: Optional[str]
 
+    # Observability / lifecycle fields (all JSON-safe).
+    group_key: Optional[str]          # ingestion grouping key, e.g. "ip:10.0.0.5"
+    phase_history: list[dict]         # [{node, phase, started_at, ended_at, duration_s}]
+    hitl_paused_at: Optional[str]     # ISO8601 wall-clock time the HITL gate paused
+    hitl_operator_note: Optional[str]
+    error: Optional[str]              # set when a node failed (current_phase=FAILED)
+    rollback_result: Optional[dict]   # set by POST /api/incidents/{id}/rollback
+    # Every forensics-agent step: [{step, tool, args, result_summary, duration_ms}]
+    forensics_trace: list[dict]
+    # {"first_seen": ISO, "last_seen": ISO} of the incident's log lines (for related-log lookups)
+    time_window: Optional[dict]
 
-def new_incident_state() -> UICRState:
+
+def new_incident_state(group_key: str | None = None) -> UICRState:
     """Factory for a fresh UICR at graph entry. Called once per ingested incident."""
     return UICRState(
         incident_id=str(uuid4()),
@@ -261,4 +297,12 @@ def new_incident_state() -> UICRState:
         current_phase=PipelinePhase.INGESTED.value,
         compressed=False,
         report_path=None,
+        group_key=group_key,
+        phase_history=[],
+        hitl_paused_at=None,
+        hitl_operator_note=None,
+        error=None,
+        rollback_result=None,
+        forensics_trace=[],
+        time_window=None,
     )

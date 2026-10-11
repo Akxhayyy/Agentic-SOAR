@@ -47,13 +47,13 @@ echo           All dependencies installed.
 echo.
 echo [STEP 3/6] Downloading AI Model weights via Ollama...
 echo ---------------------------------------------------------------
-echo           Pulling embedding model (nomic-embed-text)...
-ollama pull nomic-embed-text
-echo.
-echo           Pulling reasoning model (qwen2.5:3b-instruct)...
-echo           This is ~1.9 GB. Should take just a few minutes.
-ollama pull qwen2.5:3b-instruct
-echo           Both models ready.
+echo           Pulling every model listed in config\hitl_config.yaml...
+echo           (qwen3:8b is ~5.2 GB on first download)
+for /f "usebackq delims=" %%M in (`python scripts\required_models.py`) do (
+    echo           - %%M
+    ollama pull %%M
+)
+echo           Models ready.
 
 echo.
 echo [STEP 4/6] Indexing threat playbooks into ChromaDB vector store...
@@ -72,21 +72,35 @@ set DO_NOT_TRACK=1
 echo           Single-model VRAM lock engaged.
 
 echo.
-echo [STEP 6/6] Launching SOAR Capsule services...
+echo [STEP 6/6] Building the web UI (first run only) and launching...
 echo ---------------------------------------------------------------
-echo           Starting FastAPI backend on port 8000...
-start "SOAR Backend" cmd /k "call venv\Scripts\activate.bat && uvicorn main:app --port 8000"
-echo           Waiting 8 seconds for backend to initialize...
-timeout /t 8 > nul
-echo           Starting Streamlit SOC Dashboard...
-start "SOAR Dashboard" cmd /k "call venv\Scripts\activate.bat && streamlit run dashboard/app.py --theme.base=dark"
+if exist "frontend\dist\index.html" (
+    echo           Web UI already built. Skipping.
+) else (
+    REM "if errorlevel" (not %%ERRORLEVEL%%) - variables inside a ( ) block expand at parse time
+    call npm --version >nul 2>&1
+    if errorlevel 1 (
+        echo [WARN] Node.js not found and frontend\dist is missing.
+        echo        Install Node 18+ once, or copy a prebuilt frontend\dist from another machine.
+        echo        The API still works at http://127.0.0.1:8000/docs
+    ) else (
+        pushd frontend
+        call npm ci --no-audit --no-fund
+        call npm run build
+        popd
+    )
+)
+echo           Starting the SOAR backend + UI on http://127.0.0.1:8000 ...
+start "SOAR Capsule" cmd /k "call venv\Scripts\activate.bat && uvicorn main:app --host 127.0.0.1 --port 8000"
+timeout /t 6 > nul
+start "" http://127.0.0.1:8000
 
 echo.
 echo ============================================================
 echo   SOAR CAPSULE IS NOW RUNNING
 echo.
-echo   Backend API:    http://127.0.0.1:8000
-echo   SOC Dashboard:  http://localhost:8501
+echo   SOC console:  http://127.0.0.1:8000
+echo   API docs:     http://127.0.0.1:8000/docs
 echo.
 echo   This window can be closed safely.
 echo ============================================================
