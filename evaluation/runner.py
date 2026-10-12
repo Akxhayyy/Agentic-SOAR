@@ -79,7 +79,8 @@ def isolated_runtime(run_dir: Path, model: str | None = None, security: dict | N
         cfg.update(saved)
 
 
-def run_logs(graph, text: str, decision: str = "APPROVED") -> RunOutput:
+def run_logs(graph, text: str, decision: str = "APPROVED", ack_uncorroborated: bool = True) -> RunOutput:
+    """ack_uncorroborated=True models an operator who approves regardless (benchmark default)."""
     from agents.llm_client import reset_usage, usage_snapshot
     from core.checkpointer import thread_config_for_incident
     from ingestion.batch_processor import preview_log_file, process_log_file
@@ -93,7 +94,8 @@ def run_logs(graph, text: str, decision: str = "APPROVED") -> RunOutput:
         cfg = thread_config_for_incident(inc["incident_id"])
         snap = graph.get_state(cfg)
         if snap.next:
-            graph.invoke(Command(resume={"decision": decision, "note": "auto-decided by evaluation harness"}), cfg)
+            graph.invoke(Command(resume={"decision": decision, "note": "auto-decided by evaluation harness",
+                                         "ack_uncorroborated": ack_uncorroborated}), cfg)
         states.append(graph.get_state(cfg).values)
     return RunOutput(
         states=states,

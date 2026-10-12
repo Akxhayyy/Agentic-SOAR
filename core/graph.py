@@ -146,6 +146,7 @@ def hitl_gate_node(state: UICRState) -> UICRState:
     state["hitl_decision"] = decision
     note = (operator_input or {}).get("note")
     state["hitl_operator_note"] = str(note)[:500] if note else None
+    state["hitl_ack_uncorroborated"] = bool((operator_input or {}).get("ack_uncorroborated", False))
     return state
 
 

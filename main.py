@@ -180,7 +180,8 @@ def _load_incident(incident_id: str) -> tuple[dict, bool]:
 # HITL: resume + timeout watchers
 # ---------------------------------------------------------------------------
 
-async def _resume(incident_id: str, decision: str, actor: str, note: str | None = None) -> dict:
+async def _resume(incident_id: str, decision: str, actor: str, note: str | None = None,
+                  ack_uncorroborated: bool = False) -> dict:
     """Single resume path for operator decisions and timeouts."""
     async with _lock_for(incident_id):
         graph = get_compiled_graph()
@@ -192,10 +193,13 @@ async def _resume(incident_id: str, decision: str, actor: str, note: str | None 
         if task and task is not asyncio.current_task():
             task.cancel()
 
-        audit("hitl_decision", incident_id, actor=actor, decision=decision, note=note)
+        audit("hitl_decision", incident_id, actor=actor, decision=decision, note=note,
+              acknowledged_uncorroborated=ack_uncorroborated)
         events.publish("hitl_decided", incident_id=incident_id, decision=decision, actor=actor)
         result = await asyncio.to_thread(
-            graph.invoke, Command(resume={"decision": decision, "note": note}), config
+            graph.invoke,
+            Command(resume={"decision": decision, "note": note, "ack_uncorroborated": ack_uncorroborated}),
+            config,
         )
         audit("incident_closed", incident_id, threat_status=result.get("threat_status"),
               phase=result.get("current_phase"))
@@ -261,8 +265,9 @@ async def _run_single(payload: IngestPayload) -> dict:
     parsed = parse_log_file(entry.raw_text, default_log_type=entry.log_type)
     stamp = next((l.timestamp for l in parsed if l.timestamp), entry.received_at)
     state["time_window"] = {"first_seen": stamp.isoformat(), "last_seen": stamp.isoformat()}
+    state["source_batch"] = f"single:{incident_id}"
     try:
-        await asyncio.to_thread(log_store.add_lines, f"single:{incident_id}", parsed)
+        await asyncio.to_thread(log_store.add_lines, state["source_batch"], parsed)
     except Exception:  # noqa: BLE001 — enrichment only
         logger.exception("Failed to persist line to the log store")
     audit("ingest", incident_id, source=payload.source, lines=1)
@@ -422,13 +427,25 @@ class DecisionPayload(BaseModel):
     decision: str
     note: str | None = Field(default=None, max_length=500)
     operator: str = Field(default="operator", max_length=64)
+    # Required to APPROVE a destructive plan that lacks independent corroboration.
+    acknowledge_uncorroborated: bool = False
 
 
 @app.post("/api/incidents/{incident_id}/decision")
 async def api_decision(incident_id: str, body: DecisionPayload):
     if body.decision not in (HitlDecision.APPROVED.value, HitlDecision.REJECTED.value):
         raise HTTPException(status_code=400, detail="decision must be APPROVED or REJECTED (TIMEOUT is system-fired only).")
-    await _resume(incident_id, body.decision, actor=body.operator, note=body.note)
+    if body.decision == HitlDecision.APPROVED.value and not body.acknowledge_uncorroborated:
+        state, _ = await asyncio.to_thread(_load_incident, incident_id)
+        corr = state.get("corroboration") or {}
+        if corr.get("applies") and not corr.get("met"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"This plan has only {corr.get('count', 0)}/{corr.get('required', 2)} independent signal(s). "
+                       "Verify it independently and resend with acknowledge_uncorroborated=true, or reject.",
+            )
+    await _resume(incident_id, body.decision, actor=body.operator, note=body.note,
+                  ack_uncorroborated=body.acknowledge_uncorroborated)
     state, paused = await asyncio.to_thread(_load_incident, incident_id)
     return {"incident_id": incident_id, "summary": _summary(incident_id, state, paused)}
 

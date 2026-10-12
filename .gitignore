@@ -21,6 +21,7 @@ data/reports/
 
 # Runtime audit trail + benchmark / red-team run artefacts (headline tables live in README.md)
 data/audit.log
+data/secrets/
 data/eval/
 data/redteam/
 

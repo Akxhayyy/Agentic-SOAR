@@ -90,8 +90,9 @@ def process_log_file(
         "Batch ingest: %d total lines, %d flagged suspicious, %d incident groups formed",
         len(all_lines), len(suspicious), len(groups),
     )
+    batch_id = str(uuid.uuid4())
     try:
-        log_store.add_lines(str(uuid.uuid4()), all_lines)  # context for the forensics agent
+        log_store.add_lines(batch_id, all_lines)  # context for the forensics agent + corroboration
     except Exception:  # noqa: BLE001 — enrichment only; never block ingestion
         logger.exception("Failed to persist lines to the log store")
     if on_groups:
@@ -100,7 +101,7 @@ def process_log_file(
     graph = get_compiled_graph()
     created = []
     for group in groups:
-        summary = _run_group_as_incident(group, graph)
+        summary = _run_group_as_incident(group, graph, batch_id)
         created.append(summary)
         if on_incident:
             on_incident(summary)
@@ -114,7 +115,7 @@ def process_log_file(
     }
 
 
-def _run_group_as_incident(group: IncidentGroup, graph) -> dict:
+def _run_group_as_incident(group: IncidentGroup, graph, batch_id: str | None = None) -> dict:
     """
     Each line is validated as its OWN RawLogEntry (not concatenated) so a
     multi-line burst never gets truncated by the 1024-char hostile-boundary
@@ -127,6 +128,7 @@ def _run_group_as_incident(group: IncidentGroup, graph) -> dict:
 
     state = new_incident_state(group_key=group.group_key)
     state["raw_logs"] = validated_entries
+    state["source_batch"] = batch_id
     stamps = sorted(l.timestamp for l in group.lines if l.timestamp)
     if stamps:
         state["time_window"] = {"first_seen": stamps[0].isoformat(), "last_seen": stamps[-1].isoformat()}

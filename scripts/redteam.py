@@ -31,12 +31,14 @@ def run_suite(payloads: list[dict], model: str, run_dir: Path) -> list[dict]:
     from evaluation.redteam import DEFENCES_OFF, DEFENCES_ON, run_payload
 
     rows = []
+    base = run_dir / model.replace(":", "_").replace("/", "_")
     for p in payloads:
-        for mode, defences in (("off", DEFENCES_OFF), ("on", DEFENCES_ON)):
-            row = run_payload(p, defences, run_dir / model.replace(":", "_").replace("/", "_") / f"{p['id']}_{mode}",
-                              model=None if model == "hijacked" else model)
+        for mode, defences, operator in (("off", DEFENCES_OFF, "rubber_stamp"), ("on", DEFENCES_ON, "rubber_stamp"),
+                                         ("on", DEFENCES_ON, "careful")):
+            row = run_payload(p, defences, base / f"{p['id']}_{mode}_{operator}",
+                              model=None if model == "hijacked" else model, operator=operator)
             rows.append(row)
-            print(f"  [{model}] {p['id']} {p['attack_class']:<20} defences {mode:<3} -> "
+            print(f"  [{model}] {p['id']} {p['attack_class']:<20} defences {mode:<3} {operator:<12} -> "
                   f"{'ATTACK SUCCEEDED' if row['success'] else 'blocked: ' + str(row['blocked_by'])}", flush=True)
     return rows
 

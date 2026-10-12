@@ -44,7 +44,11 @@ def isolate_runtime(tmp_path):
     cfg["logging"]["audit_log_path"] = str(tmp_path / "audit.log")
     cfg["forensics"]["log_store_path"] = str(tmp_path / "logstore.db")
     cfg["forensics"]["agent"].update(enabled=True, max_tool_calls=5)
-    cfg["security"].update(grounding=True, deny_list=True, hash_check=True)
+    cfg["security"].update(grounding=True, deny_list=True, hash_check=True,
+                           plan_key_path=str(tmp_path / "secrets" / "plan_signing.key"),
+                           # Off by default so each test exercises one control;
+                           # tests/test_corroboration.py turns it on explicitly.
+                           corroboration={"enabled": False, "min_signals": 2, "window_s": 3600})
     yield cfg
     cfg.clear()
     cfg.update(saved)

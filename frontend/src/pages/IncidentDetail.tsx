@@ -81,6 +81,31 @@ function Trace({ steps }: { steps: TraceStep[] }) {
   );
 }
 
+const SIGNAL_LABELS: Record<string, string> = {
+  incident_evidence: "Incident evidence",
+  second_telemetry_type: "Second telemetry type",
+  independent_source: "Independent feed",
+  threat_intel: "Threat-intel match",
+  prior_incident: "Prior incident",
+};
+
+/** Independent signals behind a destructive plan (agents/corroboration.py). */
+function CorroborationBox({ corr }: { corr: NonNullable<IncidentDetail["state"]["corroboration"]> }) {
+  return (
+    <div className="rounded-md border border-line bg-bg p-3">
+      <p className="label flex items-center gap-1.5">
+        {corr.met ? <Check aria-hidden className="h-3.5 w-3.5 text-ok" /> : <ShieldAlert aria-hidden className="h-3.5 w-3.5 text-med" />}
+        Corroboration: {corr.count} of {corr.required} independent signals {corr.met ? "(met)" : "(not met)"}
+      </p>
+      <ul className="mt-1.5 space-y-0.5 text-xs">
+        {corr.signals.map((s) => (
+          <li key={s.kind}><span className="text-fg">{SIGNAL_LABELS[s.kind] ?? s.kind}</span> <span className="text-muted">· {s.detail}</span></li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function KV({ k, children }: { k: string; children: ReactNode }) {
   return (
     <div className="flex flex-wrap gap-x-3 text-sm">
@@ -106,10 +131,14 @@ function DecisionPanel({ d, now }: { d: IncidentDetail; now: number }) {
   const [note, setNote] = useState("");
   const [operator, setOperator] = useOperatorName();
   const [confirmText, setConfirmText] = useState("");
+  const [ackUncorroborated, setAck] = useState(false);
   const remaining = hitlRemaining(d.state.hitl_paused_at, d.hitl_timeout_seconds, now) ?? d.hitl_timeout_seconds;
   const needsTypedConfirm = !d.dry_run && plan.action_type !== "NO_ACTION";
+  const corr = d.state.corroboration;
+  const needsAck = !!corr?.applies && !corr.met;
   const decide = useMutation({
-    mutationFn: (decision: "APPROVED" | "REJECTED") => api.decide(d.incident_id, decision, note, operator),
+    mutationFn: (decision: "APPROVED" | "REJECTED") =>
+      api.decide(d.incident_id, decision, note, operator, decision === "APPROVED" && ackUncorroborated),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["incident", d.incident_id] });
       qc.invalidateQueries({ queryKey: ["incidents"] });
@@ -141,6 +170,17 @@ function DecisionPanel({ d, now }: { d: IncidentDetail; now: number }) {
           <p className="mt-1 text-xs text-faint">{d.dry_run ? "Dry-run: the action will be simulated." : "LIVE: this runs a real OS command."}</p>
         </div>
 
+        {corr?.applies && <CorroborationBox corr={corr} />}
+        {needsAck && (
+          <label className="flex items-start gap-2 rounded-md border border-med/50 bg-med/10 p-2.5 text-xs text-fg">
+            <input type="checkbox" className="mt-0.5" checked={ackUncorroborated} onChange={(e) => setAck(e.target.checked)} />
+            <span>
+              Only {corr!.count} of {corr!.required} independent signals. I verified this target through another
+              source (call, EDR console, IdP logs) and accept that the evidence could be forged.
+            </span>
+          </label>
+        )}
+
         <label className="block">
           <span className="label">Note for the audit log (optional)</span>
           <textarea className="input mt-1 h-16 resize-y" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)}
@@ -162,7 +202,7 @@ function DecisionPanel({ d, now }: { d: IncidentDetail; now: number }) {
             <X className="h-4 w-4" /> Reject
           </button>
           <button className="btn-primary" onClick={() => decide.mutate("APPROVED")}
-                  disabled={decide.isPending || (needsTypedConfirm && confirmText !== plan.target)}>
+                  disabled={decide.isPending || (needsTypedConfirm && confirmText !== plan.target) || (needsAck && !ackUncorroborated)}>
             {decide.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Approve
           </button>
         </div>
@@ -349,7 +389,8 @@ export default function IncidentDetailPage() {
                     ? <span className="inline-flex items-center gap-1"><Check className="h-3.5 w-3.5 text-ok" /> {s.action_plan.grounding_note || "passed"}</span>
                     : <span className="inline-flex items-center gap-1"><XCircle className="h-3.5 w-3.5 text-crit" /> {s.action_plan.grounding_note}</span>}
                 </KV>
-                <KV k="SHA-256"><span className="break-all font-mono text-xs text-muted">{s.action_plan.payload_hash}</span></KV>
+                {s.corroboration?.applies && <CorroborationBox corr={s.corroboration} />}
+                <KV k="HMAC seal"><span className="break-all font-mono text-xs text-muted">{s.action_plan.payload_hash}</span></KV>
               </>}
             </Step>
 

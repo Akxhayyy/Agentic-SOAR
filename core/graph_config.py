@@ -32,6 +32,7 @@ _PATH_KEYS = (
     ("forensics", "log_store_path"),
     ("forensics", "threat_intel_path"),
     ("logging", "audit_log_path"),
+    ("security", "plan_key_path"),
 )
 
 
@@ -70,6 +71,7 @@ def load_config() -> dict:
     sec = cfg.setdefault("security", {})
     for flag in ("grounding", "deny_list", "hash_check"):
         sec.setdefault(flag, True)
+    sec.setdefault("plan_key_path", "./data/secrets/plan_signing.key")
     cfg.setdefault("logging", {}).setdefault("audit_log_path", "./data/audit.log")
 
     for section, key in _PATH_KEYS:

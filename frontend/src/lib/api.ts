@@ -115,6 +115,16 @@ export interface IncidentState {
   report_path: string | null;
   error: string | null;
   rollback_result: { action: string; target: string; by: string; note: string | null; at: string } | null;
+  corroboration: Corroboration | null;
+  hitl_ack_uncorroborated?: boolean;
+}
+
+export interface Corroboration {
+  applies: boolean;
+  met: boolean;
+  count: number;
+  required: number;
+  signals: { kind: string; detail: string }[];
 }
 
 export interface IncidentDetail {
@@ -235,8 +245,9 @@ export const api = {
   incident: (id: string) => request<IncidentDetail>(`/api/incidents/${encodeURIComponent(id)}`),
   report: (id: string) => request<{ markdown: string }>(`/api/incidents/${encodeURIComponent(id)}/report`),
   incidentAudit: (id: string) => request<AuditRecord[]>(`/api/incidents/${encodeURIComponent(id)}/audit`),
-  decide: (id: string, decision: "APPROVED" | "REJECTED", note: string, operator: string) =>
-    post<{ summary: IncidentSummary }>(`/api/incidents/${encodeURIComponent(id)}/decision`, { decision, note: note || null, operator }),
+  decide: (id: string, decision: "APPROVED" | "REJECTED", note: string, operator: string, acknowledgeUncorroborated = false) =>
+    post<{ summary: IncidentSummary }>(`/api/incidents/${encodeURIComponent(id)}/decision`,
+      { decision, note: note || null, operator, acknowledge_uncorroborated: acknowledgeUncorroborated }),
   rollback: (id: string, operator: string, note: string) =>
     post(`/api/incidents/${encodeURIComponent(id)}/rollback`, { operator, note: note || null }),
   preview: (file_text: string, delimiter: string | null) =>

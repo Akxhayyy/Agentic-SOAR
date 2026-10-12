@@ -11,11 +11,12 @@ never trust any field on the incoming ActionPlan without re-validating it
 independently of whatever validation already happened upstream.
 
 Defense layers, in order, ALL of which must pass before any action fires:
-  1. hash re-verification — recompute payload_hash from
-     (action_type, target, params) using the exact same canonical
-     serialization as neutralizer.py, and compare to the hash stored on
-     the plan. Mismatch = the in-memory object was mutated after planning
-     (e.g. by a bug, a race, or a worse actor) → ABORT, do not execute.
+  1. seal re-verification — recompute the HMAC-SHA256 seal
+     (core/plan_seal.py) from THIS incident's id and the (action_type,
+     target, params, justification) about to be acted on, and compare to the
+     stored payload_hash in constant time. Mismatch = the plan was altered
+     after it was sealed, moved from another incident, or forged without the
+     signing key → ABORT, do not execute.
   2. regex charset re-check on `target` — SAFE_TOKEN_PATTERN, independently
      re-applied here even though Pydantic already enforced it on ActionPlan.
      This is deliberate duplication: it means a future code change that
@@ -39,13 +40,13 @@ checked dispatch pattern.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
 import socket
 from pathlib import Path
 
+from core import plan_seal
 from core.uicr_schema import ActionPlan, ActionType, ExecutionResult, PipelinePhase, UICRState
 from core.graph_config import load_config
 from execution import stub_infra_api
@@ -56,20 +57,6 @@ logger = logging.getLogger("soar.execution_wrapper")
 # deliberate: this module must remain correct even if someone changes the
 # schema module's import surface. Keep the literal pattern identical.
 SAFE_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-@]+$")  # ASCII only: \w admits Unicode homoglyphs
-
-
-def _canonical_payload(action_type: str, target: str, params: dict) -> str:
-    """MUST match agents/neutralizer.py:_canonical_payload exactly."""
-    return json.dumps(
-        {"action_type": action_type, "target": target, "params": params},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _recompute_hash(action_type: str, target: str, params: dict) -> str:
-    canonical = _canonical_payload(action_type, target, params)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _is_protected(target: str, cfg: dict) -> bool:
@@ -119,18 +106,20 @@ def execute_action(state: UICRState) -> UICRState:
 
     plan = ActionPlan(**plan_dict)  # re-validate from the dict, never trust the raw dict directly
 
-    # --- Layer 1: hash re-verification -----------------------------------
-    recomputed = _recompute_hash(plan.action_type.value, plan.target, plan.params)
-    hash_ok = recomputed == plan.payload_hash
+    # --- Layer 1: HMAC seal re-verification ------------------------------
+    hash_ok = plan_seal.verify(
+        plan.payload_hash, state.get("incident_id", ""), plan.action_type.value,
+        plan.target, plan.params, plan.justification,
+    )
     if not hash_ok and cfg["security"]["hash_check"]:
         logger.critical(
-            "PAYLOAD HASH MISMATCH for incident %s: stored=%s recomputed=%s. "
-            "Aborting execution — possible state tampering.",
-            state.get("incident_id"), plan.payload_hash, recomputed,
+            "PLAN SEAL MISMATCH for incident %s (stored=%s). Aborting execution — the plan was "
+            "altered after sealing, belongs to another incident, or was forged without the key.",
+            state.get("incident_id"), plan.payload_hash,
         )
         return _record_failed_execution(
             state, target=plan.target, action_type=plan.action_type,
-            error="payload_hash verification failed; execution aborted.",
+            error="payload_hash seal verification failed; execution aborted.",
             hash_verified=False,
         )
 
@@ -156,6 +145,20 @@ def execute_action(state: UICRState) -> UICRState:
         return _record_failed_execution(
             state, target=plan.target, action_type=plan.action_type,
             error="target is on the protected-asset deny-list; execution refused.",
+            hash_verified=True,
+        )
+
+    # --- Layer 2c: corroboration, RE-ASSESSED here (stored result not trusted) ---
+    from agents.corroboration import assess
+
+    corr = assess(state, plan.action_type.value, plan.target)
+    if corr["applies"] and not corr["met"] and not state.get("hitl_ack_uncorroborated"):
+        logger.warning("Uncorroborated %s on '%s' without operator acknowledgement. Refusing.",
+                       plan.action_type.value, plan.target[:32])
+        return _record_failed_execution(
+            state, target=plan.target, action_type=plan.action_type,
+            error=f"uncorroborated: only {corr['count']}/{corr['required']} independent signal(s) and "
+                  "no operator acknowledgement; execution refused.",
             hash_verified=True,
         )
 

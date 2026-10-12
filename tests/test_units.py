@@ -269,11 +269,13 @@ def test_plan_schema_unconstrained_when_grounding_disabled(isolate_runtime):
 
 def test_neutralizer_grounded_plan_and_hash(fake_llm):
     from agents.neutralizer import neutralizer_node
-    from execution.wrapper import _recompute_hash
+    from core import plan_seal
 
-    plan = neutralizer_node(_planner_state())["action_plan"]
+    state = _planner_state()
+    plan = neutralizer_node(state)["action_plan"]
     assert plan["action_type"] == "LOCK_ACCOUNT" and plan["target"] == "admin" and plan["grounded"]
-    assert plan["payload_hash"] == _recompute_hash("LOCK_ACCOUNT", "admin", {})
+    assert plan_seal.verify(plan["payload_hash"], state["incident_id"], "LOCK_ACCOUNT", "admin", {},
+                            plan["justification"])
     assert "Containment Steps" in fake_llm.calls[0]["user_prompt"]  # RAG text reaches the planner
 
 
@@ -305,15 +307,62 @@ def test_neutralizer_none_target_becomes_no_action(fake_llm):
 # --------------------------------------------------------------------------- execution wrapper
 
 def _plan_state(action="LOCK_ACCOUNT", target="admin", tamper=False):
-    from agents.neutralizer import _compute_payload_hash
+    from agents.neutralizer import sealed_plan
 
     s = new_incident_state()
-    h = _compute_payload_hash(action, target, {})
-    s["action_plan"] = ActionPlan(action_type=action, target=target, params={}, justification="j",
-                                  payload_hash=h).model_dump(mode="json")
+    s["action_plan"] = sealed_plan(s["incident_id"], ActionType(action), target, {}, "j").model_dump(mode="json")
     if tamper:
         s["action_plan"]["target"] = "root"
     return s
+
+
+# --------------------------------------------------------------------------- HMAC plan seal
+
+def test_seal_is_deterministic_and_order_independent():
+    from core import plan_seal
+
+    a = plan_seal.seal("inc-1", "LOCK_ACCOUNT", "bob", {"x": "1", "y": "2"}, "why")
+    b = plan_seal.seal("inc-1", "LOCK_ACCOUNT", "bob", {"y": "2", "x": "1"}, "why")
+    assert a == b and len(a) == 64
+
+
+@pytest.mark.parametrize("field,value", [
+    ("incident_id", "inc-2"),          # replay into another incident
+    ("action_type", "ISOLATE_HOST"),
+    ("target", "alice"),
+    ("params", {"x": "9"}),
+    ("justification", "edited text"),  # what the operator read
+])
+def test_seal_breaks_on_any_sealed_field(field, value):
+    from core import plan_seal
+
+    base = dict(incident_id="inc-1", action_type="LOCK_ACCOUNT", target="bob", params={"x": "1"}, justification="why")
+    s = plan_seal.seal(**base)
+    assert plan_seal.verify(s, **base)
+    assert not plan_seal.verify(s, **{**base, field: value})
+
+
+def test_plain_sha256_recompute_no_longer_forges_a_plan():
+    # The old scheme: anyone with state write access could recompute SHA-256 after tampering.
+    import hashlib
+
+    from core import plan_seal
+
+    canon = plan_seal.canonical_plan("inc-1", "LOCK_ACCOUNT", "ceo", {}, "why")
+    forged = hashlib.sha256(canon.encode()).hexdigest()
+    assert not plan_seal.verify(forged, "inc-1", "LOCK_ACCOUNT", "ceo", {}, "why")
+
+
+def test_signing_key_file_created_once_and_env_override(isolate_runtime, monkeypatch, tmp_path):
+    from core import plan_seal
+
+    key_file = tmp_path / "k" / "plan.key"
+    isolate_runtime["security"]["plan_key_path"] = str(key_file)
+    s1 = plan_seal.seal("i", "NO_ACTION", "none", {}, "j")
+    assert key_file.exists() and len(key_file.read_text().strip()) == 64
+    assert plan_seal.seal("i", "NO_ACTION", "none", {}, "j") == s1
+    monkeypatch.setenv("SOAR_PLAN_KEY", "ab" * 32)
+    assert plan_seal.seal("i", "NO_ACTION", "none", {}, "j") != s1
 
 
 def test_wrapper_executes_verified_plan():

@@ -24,20 +24,23 @@ Any failure downgrades the plan to NO_ACTION with the reason recorded, so
 the operator sees exactly why. Previously a plan could target a value that
 appeared nowhere in the evidence (e.g. `user@example.com`).
 
-Hash contract: payload_hash = SHA256(canonical_json({action_type, target,
-params})). Both this node and execution/wrapper.py MUST use the exact same
-serialization, or every legitimate plan would fail verification.
+Seal contract: payload_hash = HMAC-SHA256(key, canonical_json({incident_id,
+action_type, target, params, justification})) — see core/plan_seal.py. The
+execution wrapper recomputes it from the fields it is about to act on;
+changing the target, the action, the text the operator approved, or moving
+the plan to another incident all break the seal, and without the key the
+seal cannot be recomputed.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import socket
 
 from pydantic import BaseModel, Field, ValidationError
 
+from core import plan_seal
 from core.uicr_schema import ActionPlan, ActionType, IOCType, PipelinePhase, UICRState
 from core.graph_config import load_config, reasoning_model_for
 from agents.llm_client import call_reasoning_model, parse_json_response, strict_schema
@@ -82,18 +85,19 @@ class _PlanOutput(BaseModel):
     justification: str = Field(..., max_length=2000)
 
 
-def _canonical_payload(action_type: str, target: str, params: dict) -> str:
-    """Shared canonical serialization — MUST match execution/wrapper.py exactly."""
-    return json.dumps(
-        {"action_type": action_type, "target": target, "params": params},
-        sort_keys=True,
-        separators=(",", ":"),
+def sealed_plan(incident_id: str, action_type: ActionType, target: str, params: dict,
+                justification: str, grounded: bool = True, grounding_note: str = "") -> ActionPlan:
+    """Builds an ActionPlan whose payload_hash is the HMAC seal over what will be approved."""
+    justification = justification[:512]
+    return ActionPlan(
+        action_type=action_type,
+        target=target,
+        params=params,
+        justification=justification,
+        payload_hash=plan_seal.seal(incident_id, action_type.value, target, params, justification),
+        grounded=grounded,
+        grounding_note=grounding_note[:256],
     )
-
-
-def _compute_payload_hash(action_type: str, target: str, params: dict) -> str:
-    canonical = _canonical_payload(action_type, target, params)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def protected_targets() -> set[str]:
@@ -176,19 +180,12 @@ def _branch(props: dict, action: str, targets: list[str]) -> dict:
     }
 
 
-def _no_action(reason: str) -> ActionPlan:
-    return ActionPlan(
-        action_type=ActionType.NO_ACTION,
-        target="none",
-        params={},
-        justification=reason[:512],
-        payload_hash=_compute_payload_hash(ActionType.NO_ACTION.value, "none", {}),
-        grounded=True,
-        grounding_note="",
-    )
+def _no_action(incident_id: str, reason: str, grounded: bool = True, note: str = "") -> ActionPlan:
+    return sealed_plan(incident_id, ActionType.NO_ACTION, "none", {}, reason, grounded, note)
 
 
 def neutralizer_node(state: UICRState) -> UICRState:
+    incident_id = state.get("incident_id", "")
     forensics = state.get("forensics") or {}
     triage = state.get("triage") or {}
     iocs = triage.get("iocs", [])
@@ -237,30 +234,27 @@ def neutralizer_node(state: UICRState) -> UICRState:
         if not ok:
             logger.warning("Neutralizer plan rejected by grounding check: %s", note)
             plan = _no_action(
+                incident_id,
                 f"Proposed {out.action_type.value} on '{target[:64]}' was blocked: {note} "
-                "Manual review required."
+                "Manual review required.",
+                grounded=False, note=note,
             )
-            plan.grounded = False
-            plan.grounding_note = note[:256]
         elif out.action_type == ActionType.NO_ACTION:
-            plan = _no_action(out.justification)
+            plan = _no_action(incident_id, out.justification)
         else:
-            plan = ActionPlan(
-                action_type=out.action_type,
-                target=target,
-                params=out.params,
-                justification=out.justification[:512],
-                payload_hash=_compute_payload_hash(out.action_type.value, target, out.params),
-                grounded=True,
-                grounding_note=note[:256],
-            )
+            plan = sealed_plan(incident_id, out.action_type, target, out.params, out.justification,
+                               grounded=True, grounding_note=note)
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as e:
         logger.error("Neutralizer plan failed validation, defaulting to NO_ACTION: %s", e)
         plan = _no_action(
+            incident_id,
             f"Automated plan generation failed validation ({type(e).__name__}); "
             "defaulting to no action pending manual review."
         )
 
     state["action_plan"] = plan.model_dump(mode="json")
+    from agents.corroboration import assess
+
+    state["corroboration"] = assess(state, plan.action_type.value, plan.target)
     state["current_phase"] = PipelinePhase.NEUTRALIZER_PLANNED.value
     return state

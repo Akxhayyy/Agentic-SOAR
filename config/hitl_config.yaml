@@ -27,7 +27,17 @@ security:
   # harness (scripts/redteam.py) switches them off to measure their effect.
   grounding: true        # Neutralizer target must be an extracted IOC of a compatible type
   deny_list: true        # execution.protected_targets enforced (Neutralizer + wrapper)
-  hash_check: true       # wrapper re-verifies the plan SHA-256 before acting
+  hash_check: true       # wrapper re-verifies the plan's HMAC-SHA256 seal before acting
+  # 256-bit signing key for plan seals; generated on first use, never committed.
+  # Override with the SOAR_PLAN_KEY environment variable (hex).
+  plan_key_path: "./data/secrets/plan_signing.key"
+  # Destructive plans need >= min_signals independent signals about the target
+  # (incident evidence + another feed / telemetry type / threat intel / prior incident).
+  # Uncorroborated plans run only with an explicit operator acknowledgement.
+  corroboration:
+    enabled: true
+    min_signals: 2
+    window_s: 3600
 
 hitl:
   timeout_seconds: 300

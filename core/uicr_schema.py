@@ -280,6 +280,12 @@ class UICRState(TypedDict, total=False):
     forensics_trace: list[dict]
     # {"first_seen": ISO, "last_seen": ISO} of the incident's log lines (for related-log lookups)
     time_window: Optional[dict]
+    # log-store batch the incident's lines came from (independent-source corroboration)
+    source_batch: Optional[str]
+    # agents/corroboration.py assessment of the plan target: {signals, count, required, met, applies}
+    corroboration: Optional[dict]
+    # operator explicitly acknowledged approving an UNcorroborated destructive plan
+    hitl_ack_uncorroborated: bool
 
 
 def new_incident_state(group_key: str | None = None) -> UICRState:
@@ -305,4 +311,7 @@ def new_incident_state(group_key: str | None = None) -> UICRState:
         rollback_result=None,
         forensics_trace=[],
         time_window=None,
+        source_batch=None,
+        corroboration=None,
+        hitl_ack_uncorroborated=False,
     )

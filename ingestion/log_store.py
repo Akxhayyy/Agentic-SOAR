@@ -74,7 +74,7 @@ def related_lines(indicator: str, first_seen: str | None, last_seen: str | None,
     has no timestamps, the time filter is skipped.
     """
     like = "%" + indicator.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-    sql = ("SELECT ts, ip, user, log_type, suspicious, reason, raw_text FROM log_lines "
+    sql = ("SELECT ts, ip, user, log_type, suspicious, reason, raw_text, batch_id FROM log_lines "
            "WHERE (ip = ? OR user = ? OR raw_text LIKE ? ESCAPE '\\')")
     params: list = [indicator, indicator, like]
     if first_seen and last_seen:
@@ -90,5 +90,5 @@ def related_lines(indicator: str, first_seen: str | None, last_seen: str | None,
             rows = conn.execute(sql, params).fetchall()
         finally:
             conn.close()
-    keys = ("ts", "ip", "user", "log_type", "suspicious", "reason", "raw_text")
+    keys = ("ts", "ip", "user", "log_type", "suspicious", "reason", "raw_text", "batch_id")
     return [dict(zip(keys, r)) for r in rows]
