@@ -25,12 +25,14 @@ shows up sporadically over a workweek isn't one incident).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from ingestion.cheap_filter import ParsedLogLine
 
 GROUP_WINDOW_SECONDS = 300  # 5 minutes — matches forensics pass_2 window in hitl_config.yaml
+_HOST_RE = re.compile(r"\bhost=([A-Za-z0-9][A-Za-z0-9_.\-]{0,62})")
 
 
 @dataclass
@@ -89,10 +91,16 @@ def group_suspicious_entries(
     ungrouped_counter = 0
 
     for line in suspicious_lines:
+        host = _HOST_RE.search(line.raw_text)
         if line.extracted_ip:
             key = f"ip:{line.extracted_ip}"
         elif line.extracted_user:
             key = f"user:{line.extracted_user}"
+        elif host:
+            # Endpoint telemetry (Sysmon/EDR) often has neither IP nor user on a
+            # line; without this, one attack on one host became hundreds of
+            # single-line incidents (found on the OTRF public recordings).
+            key = f"host:{host.group(1).lower()}"
         else:
             ungrouped_counter += 1
             key = f"single:{ungrouped_counter}"

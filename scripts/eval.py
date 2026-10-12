@@ -58,7 +58,9 @@ class Scenario:
     mitre: list[str] = field(default_factory=list)
     expected_playbook: str = ""
     notes: str = ""
-    difficulty: str = "standard"
+    difficulty: str = "standard"           # standard | hard | public
+    acceptable_vectors: list[str] = field(default_factory=list)  # multi-label real data
+    source: str = "synthetic"
 
 
 def load_scenarios(path: Path, limit: int | None = None) -> list[Scenario]:
@@ -96,6 +98,7 @@ def scenario_result(sc: Scenario, out) -> dict:
         "category": sc.category,
         "difficulty": sc.difficulty,
         "expected_attack_vector": sc.expected_attack_vector,
+        "acceptable_vectors": sc.acceptable_vectors or [sc.expected_attack_vector],
         "acceptable_actions": sc.acceptable_actions or [sc.expected_action_type],
         "acceptable_targets": sc.acceptable_targets,
         "expected_mitre": sc.mitre,
@@ -158,7 +161,9 @@ def _empty_output():
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    p.add_argument("--dataset", type=Path, action="append",
+                   help="scenario JSONL file; repeat to combine (default: the synthetic benchmark). "
+                        "Public data: --dataset data/benchmark/otrf_scenarios.jsonl")
     p.add_argument("--models", default=",".join(DEFAULT_MODELS),
                    help='comma-separated Ollama tags; "rules" = keyword baseline; unpulled models are skipped')
     p.add_argument("--limit", type=int, default=None, help="only run the first N scenarios")
@@ -187,7 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows cp1252 consoles
-    scenarios = load_scenarios(args.dataset)
+    datasets = args.dataset or [DEFAULT_DATASET]
+    scenarios = [sc for path in datasets for sc in load_scenarios(path)]
     if args.stratified:
         scenarios = stratify(scenarios, args.stratified)
     if args.limit:
@@ -213,11 +219,12 @@ def main(argv: list[str] | None = None) -> int:
         metrics_by_model[model] = compute_metrics(results)
 
     table = render_markdown(metrics_by_model, len(scenarios))
-    header = (f"# Benchmark results ({stamp})\n\nDataset: `{args.dataset.name}` · scenarios: {len(scenarios)} · "
+    header = (f"# Benchmark results ({stamp})\n\nDatasets: {', '.join(f'`{d.name}`' for d in datasets)} · "
+              f"scenarios: {len(scenarios)} · "
               f"HITL auto-decision: {args.decision} · skipped (not pulled): {', '.join(skipped) or 'none'}\n\n")
     (run_dir / "results.md").write_text(header + table, encoding="utf-8")
     (run_dir / "results.json").write_text(json.dumps(
-        {"stamp": stamp, "dataset": str(args.dataset), "scenarios": len(scenarios), "skipped": skipped,
+        {"stamp": stamp, "datasets": [str(d) for d in datasets], "scenarios": len(scenarios), "skipped": skipped,
          "metrics": metrics_by_model, "results": results_by_model}, indent=1), encoding="utf-8")
     print("\n" + table)
     print(f"Wrote {run_dir / 'results.md'} and results.json")

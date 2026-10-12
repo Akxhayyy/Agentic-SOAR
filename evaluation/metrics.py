@@ -73,6 +73,12 @@ def _rate(num: int, den: int) -> float | None:
     return None if den == 0 else num / den
 
 
+def _vector_ok(r: dict) -> bool:
+    """Real (public) telemetry can carry several valid readings; synthetic has one."""
+    accepted = r.get("acceptable_vectors") or [r["expected_attack_vector"]]
+    return (r["predicted_attack_vector"] or "UNKNOWN") in accepted
+
+
 def compute_metrics(results: list[dict]) -> dict:
     classified = [r for r in results if r["category"] in ("attack", "unknown") and r["incidents"] > 0]
     attacks = [r for r in results if r["category"] == "attack" and r["incidents"] > 0]
@@ -95,7 +101,7 @@ def compute_metrics(results: list[dict]) -> dict:
         return [r for r in rows if r.get("difficulty", "standard") == difficulty]
 
     def _triage_acc(rows: list[dict]) -> float | None:
-        return _rate(sum(1 for r in rows if r["predicted_attack_vector"] == r["expected_attack_vector"]), len(rows))
+        return _rate(sum(1 for r in rows if _vector_ok(r)), len(rows))
 
     def _action_acc(rows: list[dict]) -> float | None:
         return _rate(sum(1 for r in rows if (r["planned_action"] or "NO_ACTION") in r["acceptable_actions"]),
@@ -110,7 +116,11 @@ def compute_metrics(results: list[dict]) -> dict:
     return {
         "scenarios": len(results),
         "errors": sum(1 for r in results if r.get("error")),
-        "triage_accuracy": _rate(sum(1 for y, p in pairs if y == p), len(pairs)),
+        "triage_accuracy": _rate(sum(1 for r in classified if _vector_ok(r)), len(classified)),
+        "public_detected": _rate(sum(1 for r in results if r.get("difficulty") == "public" and r["incidents"] > 0),
+                                 sum(1 for r in results if r.get("difficulty") == "public")),
+        "triage_accuracy_public": _triage_acc(_split(classified, "public")),
+        "action_correct_public": _action_acc(_split(judged, "public")),
         "triage_macro_f1": macro_f1(pairs) if pairs else None,
         "triage_accuracy_standard": _triage_acc(_split(classified, "standard")),
         "triage_accuracy_hard": _triage_acc(_split(classified, "hard")),
@@ -137,11 +147,14 @@ ROWS = [
     ("Triage accuracy", "triage_accuracy", "pct"),
     ("  ↳ standard split (keyword-friendly)", "triage_accuracy_standard", "pct"),
     ("  ↳ hard split (vendor telemetry)", "triage_accuracy_hard", "pct"),
+    ("  ↳ public split (OTRF real telemetry)", "triage_accuracy_public", "pct"),
+    ("Public recordings detected by the cheap filter", "public_detected", "pct"),
     ("Triage macro-F1", "triage_macro_f1", "f2"),
     ("ATT&CK tag Jaccard", "attack_tag_jaccard", "f2"),
     ("Playbook hit rate", "playbook_hit_rate", "pct"),
     ("Action correct (playbook-permitted)", "action_correct", "pct"),
     ("  ↳ hard split", "action_correct_hard", "pct"),
+    ("  ↳ public split", "action_correct_public", "pct"),
     ("Target correct", "target_correct", "pct"),
     ("Invented-target proposals (blocked)", "invented_target_rate", "pct"),
     ("False-positive traps contained (lower is better)", "fp_containment_rate", "pct"),

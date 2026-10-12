@@ -96,6 +96,23 @@ _SUSPICIOUS_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"connection attempts to (?:[\d,]+ )?(?:sequential )?ports", re.I), "port_sweep"),
     (re.compile(r"bytes_out=\d+(\.\d+)?\s?(GB|TB)|large egress", re.I), "large_egress"),
     (re.compile(r"\bbeacon(ing)?\b", re.I), "beaconing"),
+    # --- Windows host-attack rule pack (generic Sigma / LOLBAS-style patterns) ---
+    # Added after the OTRF public-data evaluation showed the keyword rules missed
+    # half of real attack recordings (LSASS dumps, hive theft, UAC bypass, ...).
+    # Deliberately generic technique patterns, not strings from those files.
+    (re.compile(r"TargetImage=\S*lsass\.exe|comsvcs(\.dll)?\S*\s*,?\s*#?\s*(minidump|24)", re.I), "credential_dumping"),
+    (re.compile(r"(esentutl|reg(\.exe)?\s+save|vssadmin|ntdsutil)\S*.*\\(sam|system|security|ntds(\.dit)?)\b"
+                r"|\\config\\(sam|security)\b", re.I), "credential_hive_access"),
+    (re.compile(r"\b(fodhelper|computerdefaults|eventvwr|sdclt|cmstp)(\.exe)?\b|ms-settings\\shell", re.I),
+     "uac_bypass_binary"),
+    (re.compile(r"EventID=(7045|4697)\b|\bsc(\.exe)?\s+(config|create)\b", re.I), "service_install_or_modify"),
+    (re.compile(r"psexe(c|svc)|ParentImage=\S*wmiprvse\.exe|win32_process\S*\s*create", re.I), "remote_execution"),
+    (re.compile(r"\b(mshta|bitsadmin|certutil\S*\s+-urlcache|installutil|regsvr32\S*\s+/i:|msbuild)\b", re.I),
+     "lolbin_execution"),
+    (re.compile(r"currentversion\\+(run|runonce)\b", re.I), "persistence_run_key"),
+    (re.compile(r"\bnet1?(\.exe)?\s+(localgroup|group)\s+\S*admin", re.I), "privileged_group_discovery"),
+    (re.compile(r"system\.net\.httplistener|net\.webclient|invoke-expression|\biex\b|downloadstring", re.I),
+     "powershell_cradle_or_listener"),
     # --- General malicious keywords ---
     (re.compile(r"unauthorized access", re.I), "unauthorized_access"),
     (re.compile(r"malware|trojan|ransomware", re.I), "explicit_threat_keyword"),
