@@ -13,13 +13,15 @@ no API keys.
   step it took.
 * **The model can't act on what it invents.** Every LLM output is grammar-constrained to a JSON
   schema. The containment target must be an indicator that literally appears in the logs, and
-  of a type the action allows. Protected assets are refused twice, and the plan is SHA-256-sealed
-  between approval and execution.
-* **Measured, not claimed.** A 150-scenario benchmark with false-positive traps and a
-  vendor-telemetry "hard" split. On vendor logs, triage goes from **0% (keyword rules) to
-  ~80% (local LLMs)**, with ≥ 94% playbook-correct actions. A 32-payload prompt-injection red
-  team runs against a *fully hijacked* model: attack success drops **78% → 16%** with the
-  defences on (**4%** excluding evidence poisoning, which is documented as residual risk).
+  of a type the action allows. Protected assets are refused twice, plans are cryptographically
+  sealed with HMAC-SHA256, and destructive actions require independent corroboration across
+  multiple telemetry sources or threat feeds.
+* **Measured, not claimed.** Evaluated on both a 150-scenario benchmark (with false-positive
+  traps and vendor-telemetry hard splits) and real-world public telemetry (OTRF Security Datasets).
+  On vendor logs, triage goes from **0% (keyword rules) to ~80% (local LLMs)**, with ≥ 94%
+  playbook-correct actions. A 32-payload prompt-injection red team runs against a *fully hijacked*
+  model: attack success drops **78% → 16%** with defences on (**4%** excluding evidence poisoning;
+  and with corroboration + a careful operator, single-source evidence poisoning is stopped).
 * **Human in the loop by design.** Nothing executes without approval. Silence escalates (it
   never executes), every decision is audited, and contained actions can be rolled back.
 
@@ -41,14 +43,14 @@ no API keys.
 ```mermaid
 flowchart LR
     L[Log file / API] --> F[Cheap filter<br/>regex, no LLM]
-    F -->|suspicious lines| G[Grouping<br/>IP/user + 5-min window]
+    F -->|suspicious lines| G[Grouping<br/>IP/user/host + 5-min window]
     F -.->|all lines| LS[(Log store)]
     G --> T[Triage agent<br/>vector · IOCs · ATT&CK]
     T --> FA[Forensics agent<br/>≤5 read-only tool calls]
-    FA -->|similarity ≥ 0.70| N[Neutralizer<br/>one grounded, hashed plan]
+    FA -->|similarity ≥ 0.70| N[Neutralizer<br/>one grounded, HMAC-sealed plan]
     FA -->|below threshold| R
     N --> H{HITL gate<br/>300 s timeout}
-    H -->|approve| X[Execution wrapper<br/>hash · charset · deny-list]
+    H -->|approve| X[Execution wrapper<br/>HMAC seal · corroboration · charset · deny-list]
     H -->|reject / timeout| R[Report + audit]
     X --> R
     FA <-->|tools| TOOLS[search_playbooks · get_related_logs<br/>lookup_prior_incidents · check_local_threat_intel]
@@ -57,12 +59,12 @@ flowchart LR
 
 | Stage | What it does | Guardrails |
 |---|---|---|
-| **Cheap filter + grouping** (`ingestion/`) | Parses syslog, CSV, JSON lines and Windows-event/netflow styles. Flags suspicious lines with zero LLM cost and groups bursts by IP/user. A no-LLM **preview** shows what will become an incident. | 1 KB cap per line; UTC-normalised timestamps |
+| **Cheap filter + grouping** (`ingestion/`) | Parses syslog, CSV, JSON lines, and Windows Event logs (4625, 4688, 7045, etc.). Flags suspicious patterns with zero LLM cost and groups bursts by IP, user, or host. A no-LLM **preview** shows what will become an incident. | 1 KB cap per line; UTC-normalised timestamps; host/IP/user cluster keys |
 | **Triage agent** (`agents/triage.py`) | Classifies into 7 attack vectors, extracts IOCs, tags MITRE ATT&CK techniques. | JSON-schema decoding; IOCs must appear verbatim in the logs; ASCII charset allow-list; ATT&CK IDs from a closed list; deterministic regex IOCs merged in |
 | **Forensics agent** (`agents/forensics.py`) | Bounded ReAct loop over 4 **read-only** tools (≥ 1, ≤ 5 calls) and picks the response playbook. Every step goes to `forensics_trace`. | Tool calls are a grammar `anyOf`; indicator args are enums of extracted IOCs. **Routing stays deterministic**: the 0.70 decision uses the *embedding similarity* of the chosen playbook, never the agent's own confidence |
-| **Neutralizer** (`agents/neutralizer.py`) | Proposes exactly one action: isolate host, lock account, terminate/quarantine process, block IP, or none. | Grammar encodes the action↔target-type matrix; target must be an extracted IOC; deny-list; SHA-256 over the canonical plan |
-| **HITL gate** (`core/graph.py`, `main.py`) | Pauses for an operator decision and survives restarts (persisted pause time, watchers re-armed). | Per-incident lock: one decision only (409 on repeats); timeout ⇒ escalate, never execute |
-| **Execution wrapper** (`execution/wrapper.py`) | Static allow-list dispatch to a dry-run stub or real `taskkill` / firewall rules. | Re-verifies hash, charset and deny-list *independently* of the planner; list-form subprocess only |
+| **Neutralizer** (`agents/neutralizer.py`) | Proposes exactly one action: isolate host, lock account, terminate/quarantine process, block IP, or none. Evaluates independent corroboration signals. | Grammar encodes the action↔target-type matrix; target must be an extracted IOC; deny-list; HMAC-SHA256 integrity seal over the canonical plan |
+| **HITL gate** (`core/graph.py`, `main.py`) | Pauses for an operator decision and survives restarts (persisted pause time, watchers re-armed). | Per-incident lock: one decision only (409 on repeats); timeout ⇒ escalate, never execute; explicit acknowledgment required for uncorroborated destructive plans |
+| **Execution wrapper** (`execution/wrapper.py`) | Static allow-list dispatch to a dry-run stub or real `taskkill` / firewall rules. | Re-verifies HMAC seal, corroboration, charset, and deny-list *independently* of the planner; list-form subprocess only |
 | **Responder** (`agents/responder.py`) | Sets the final status (CONTAINED / CLOSED / ESCALATED / OPEN) and writes the report. | Facts section rendered from the record (no LLM). The LLM writes only the narrative, and the report is still written if the model is down |
 
 **Why only forensics is an agent:** investigation is read-only, so an agent's mistakes cost time,
@@ -261,6 +263,7 @@ attacks → mitigations with code references, red-team results, residual risks).
 
 ```bash
 python scripts/gen_benchmark.py                                  # regenerate the 150 scenarios (seeded)
+python scripts/build_otrf_benchmark.py                           # build public telemetry benchmark (OTRF)
 python scripts/eval.py --fake-llm                                # rules baseline only, seconds, no Ollama
 python scripts/eval.py --models rules,qwen3:8b,gemma4:e4b        # unpulled models are skipped
 python scripts/eval.py --models rules,qwen3:8b --stratified 3    # ~45 scenarios, quicker
@@ -283,7 +286,7 @@ Interactive docs at `/docs`. Main endpoints:
 | `POST /api/ingest_file` → `GET /api/jobs/{id}` | Background batch ingest with progress |
 | `POST /api/ingest` | Single log line (synchronous) |
 | `GET /api/incidents`, `GET /api/incidents/{id}` | Summaries / full state |
-| `POST /api/incidents/{id}/decision` | `{"decision": "APPROVED"\|"REJECTED", "note", "operator"}`; 409 if not awaiting |
+| `POST /api/incidents/{id}/decision` | `{"decision": "APPROVED"\|"REJECTED", "note", "operator", "acknowledge_uncorroborated": bool}`; 409 if not awaiting |
 | `POST /api/incidents/{id}/rollback` | Reverse an executed containment action (once) |
 | `GET /api/incidents/{id}/report`, `/audit` | Markdown report; audit records |
 | `GET /api/events` | Server-Sent Events: node progress, HITL, jobs |
@@ -309,6 +312,7 @@ not the working directory.
 | `execution.dry_run` | `true` | `false` runs real `taskkill`/`kill` and firewall rules. The console then shows **LIVE** and requires typed confirmation. |
 | `execution.protected_targets` | loopback, `soc-operator` | Never contained. The local hostname is always added. |
 | `security.grounding` / `deny_list` / `hash_check` | `true` | Only the red-team harness turns these off. |
+| `security.corroboration.enabled` | `true` | Requires independent evidence signals (≥2) for destructive containment plans. |
 | `hitl.timeout_seconds` | `300` | Silence ⇒ escalate. |
 | `forensics.similarity_hard_threshold` | `0.70` | The only escalation threshold (deterministic). |
 | `forensics.agent.enabled` / `max_tool_calls` / `min_tool_calls` | `true` / `5` / `1` | `enabled: false` falls back to two-pass retrieval + LLM re-rank. |
@@ -320,14 +324,14 @@ not the working directory.
 ## Tests
 
 ```bash
-python -m pytest tests          # 128 tests, ~15 s, no Ollama needed (scripted fake LLM)
+python -m pytest tests          # 147 tests, ~20 s, no Ollama needed (scripted fake LLM)
 cd frontend && npm test         # rendering safety (XSS), status/countdown logic
 ```
 The suite covers a regression test for every bug fixed in the rework: timezone-mixed timestamps,
 ragged CSV, fenced LLM JSON, invented targets, double approval races, restart timeout re-arm, the
-status lifecycle, and the homoglyph bypass. It also covers the forensics agent (tool budget,
-trace, read-only tools via AST check, deterministic routing), the benchmark harness and metrics,
-and the full red-team suite as regression tests.
+status lifecycle, the homoglyph bypass, HMAC plan seal integrity, corroboration gates, and host-based
+grouping. It also covers the forensics agent (tool budget, trace, read-only tools via AST check, deterministic routing),
+the benchmark harness and metrics, and the full red-team suite as regression tests.
 
 ---
 
